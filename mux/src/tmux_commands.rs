@@ -39,6 +39,7 @@ pub(crate) struct PaneItem {
 
 #[derive(Debug)]
 struct WindowItem {
+    position_key: String,
     session_id: TmuxSessionId,
     window_id: TmuxWindowId,
     window_width: u64,
@@ -497,13 +498,20 @@ impl TmuxDomainState {
                 let workspace = mux
                     .get_window(**gui_window_id)
                     .map(|w| w.get_workspace().to_string());
-                let mut window_builder = mux.new_empty_window(workspace, None);
+                let position = crate::tmux_layout::restore(&window.position_key);
+                let mut window_builder = mux.new_empty_window(workspace, position);
+                if let Some(mut local_window) = mux.get_window_mut(*window_builder) {
+                    local_window.set_tmux_position_key(window.position_key.clone());
+                }
                 mux.add_tab_to_window(&tab, *window_builder)?;
                 window_builder.notify();
             } else {
                 mux.add_tab_to_window(&tab, **gui_window_id)?;
-                gui_window_id.notify();
             }
+            // Release the transport builder's Activity in both modes. Keeping
+            // it alive prevents last-window shutdown, and dropping an unnotified
+            // builder during Mux::shutdown can recursively acquire the mux lock.
+            gui_window_id.notify();
 
             let gui_tabs = self.gui_tabs.lock();
             let local_tab = match gui_tabs.get(&window.window_id) {
@@ -783,7 +791,8 @@ impl TmuxCommand for ListAllWindows {
     fn get_command(&self, _domain_id: DomainId) -> String {
         format!(
             "list-windows -F \
-                '#{{session_id}} #{{window_id}} \
+                '#{{host}}:#{{socket_path}}:#{{pid}}:#{{session_created}}:#{{window_id}}\t\
+                #{{session_id}} #{{window_id}} \
                 #{{window_width}} #{{window_height}} \
                 #{{window_active}} \
                 #{{window_name}} \
@@ -805,6 +814,9 @@ impl TmuxCommand for ListAllWindows {
             if line.is_empty() {
                 continue;
             }
+            let (position_key, line) = line
+                .split_once('\t')
+                .ok_or_else(|| anyhow!("missing tmux window position key"))?;
             let mut fields = line.split(' ');
             let session_id =
                 parse_sigil_number(fields.next().ok_or_else(|| anyhow!("missing session_id"))?)?;
@@ -854,6 +866,7 @@ impl TmuxCommand for ListAllWindows {
             let layout = parse_layout(window_layout)?;
 
             items.push(WindowItem {
+                position_key: position_key.to_string(),
                 session_id,
                 window_id,
                 window_width,
@@ -1205,5 +1218,62 @@ impl TmuxCommand for AttachDone {
         // Do nothing, just change the state.
         *tmux_domain.inner.attach_state.lock() = AttachState::Done;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod native_window_tests {
+    use super::*;
+    use crate::activity::Activity;
+
+    #[test]
+    fn native_and_tab_modes_release_the_transport_activity() {
+        let _executor = promise::spawn::ScopedExecutor::new();
+        for native in [false, true] {
+            let mux = Arc::new(Mux::new(None));
+            Mux::set_mux(&mux);
+            let mut domain = TmuxDomain::new(usize::MAX);
+            Arc::get_mut(&mut domain.inner)
+                .unwrap()
+                .window_per_os_window = native;
+            *domain.inner.tmux_session.lock() = Some(0);
+            let domain = Arc::new(domain);
+            mux.add_domain(&(domain.clone() as Arc<dyn crate::domain::Domain>));
+            let before = Activity::count();
+            let windows: Vec<_> = (1..=3)
+                .map(|id| WindowItem {
+                    position_key: format!("test-only:{id}"),
+                    session_id: 0,
+                    window_id: id,
+                    window_width: 80,
+                    window_height: 24,
+                    window_active: id == 1,
+                    window_name: format!("window-{id}"),
+                    layout: vec![],
+                    layout_csum: String::new(),
+                    history_limit: 2000,
+                })
+                .collect();
+            domain.inner.sync_window_state(&windows, false).unwrap();
+            assert_eq!(Activity::count(), before, "native={native}");
+            {
+                let transport = domain.inner.gui_window.lock();
+                let transport = transport.as_ref().unwrap();
+                assert!(transport.notified);
+                assert!(transport.activity.is_none());
+            }
+            let tabs = domain.inner.gui_tabs.lock();
+            let window_ids: HashSet<_> = tabs
+                .values()
+                .map(|tab| mux.window_containing_tab(tab.tab_id).unwrap())
+                .collect();
+            assert_eq!(window_ids.len(), if native { 3 } else { 1 });
+            drop(tabs);
+            drop(domain);
+            Mux::shutdown();
+            // Drop outside the global mutex; the Activity assertions above
+            // detect the shutdown-deadlock regression without hanging a test.
+            drop(mux);
+        }
     }
 }

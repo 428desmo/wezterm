@@ -157,6 +157,9 @@ pub enum WindowEvent {
     /// Called when the window is being destroyed by the window system
     Destroyed,
 
+    /// Top-left of the client area in screen pixels (when supported).
+    Moved(ScreenPoint),
+
     /// Called when the window has been resized
     Resized {
         dimensions: Dimensions,

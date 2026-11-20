@@ -2975,6 +2975,32 @@ impl WindowView {
         }
     }
 
+    extern "C" fn did_move(this: &mut Object, _sel: Sel, _notification: id) {
+        if let Some(this) = Self::get_this(this) {
+            let mut inner = this.inner.borrow_mut();
+            let position = inner.window.as_ref().and_then(|window| unsafe {
+                let window = window.load();
+                let zoomed: BOOL = msg_send![*window, isZoomed];
+                if zoomed == YES
+                    || inner.fullscreen.is_some()
+                    || NSWindow::styleMask(*window)
+                        .contains(NSWindowStyleMask::NSFullScreenWindowMask)
+                {
+                    return None;
+                }
+                let frame = NSWindow::frame(*window);
+                let content = NSWindow::contentRectForFrameRect_(*window, frame);
+                Some(cartesian_to_screen_point(NSPoint::new(
+                    content.origin.x,
+                    content.origin.y + content.size.height,
+                )))
+            });
+            if let Some(position) = position {
+                inner.events.dispatch(WindowEvent::Moved(position));
+            }
+        }
+    }
+
     extern "C" fn did_end_live_resize(this: &mut Object, _sel: Sel, _notification: id) {
         if let Some(this) = Self::get_this(this) {
             let mut inner = this.inner.borrow_mut();
@@ -3346,6 +3372,10 @@ impl WindowView {
             cls.add_method(
                 sel!(windowDidResize:),
                 Self::did_resize as extern "C" fn(&mut Object, Sel, id),
+            );
+            cls.add_method(
+                sel!(windowDidMove:),
+                Self::did_move as extern "C" fn(&mut Object, Sel, id),
             );
             cls.add_method(
                 sel!(windowDidChangeScreen:),

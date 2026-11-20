@@ -120,4 +120,65 @@ host and run it there; do not use a production server.
 - Windows 11 GUI: no Windows execution environment was available. Perform the
   smoke test above using the Windows build before relying on the prototype.
 
-Position persistence and validation of windows added after attach are deferred.
+Validation of windows added after attach is deferred.
+
+## Follow-up: normal exit and desktop position restoration
+
+The user confirmed three native windows and session survival after application
+restart over SSH to their private VPS. They reported that application exit hung
+and that desktop positions reset. The following changes address these reports:
+
+- `sync_window_state` now notifies the transport's retained `MuxWindowBuilder`
+  in native mode as well. Previously its `Activity` remained live, preventing
+  last-window exit; its unnotified destructor could also call `Mux::get` while
+  `Mux::shutdown` held the global mux lock. The added regression test exercises
+  three remote windows in both modes and verifies that no Activity remains.
+- `ListAllWindows` prefixes each result with a stable remote identity:
+  hostname, socket path, server PID, session creation time and window ID.
+  `mux/src/tmux_layout.rs` saves local desktop coordinates under that identity.
+  Renaming or reordering windows does not change the key. A recreated server
+  or session gets a new identity and does not inherit the old placement.
+- macOS `windowDidMove:` and Windows `WM_WINDOWPOSCHANGED` emit client-area
+  positions in screen pixels. Only native tmux windows register those positions.
+  Saves are coalesced for 250 ms and normal mux shutdown flushes pending changes.
+  The local file is `tmux-window-positions.json` in `config::DATA_DIR`.
+- The existing native `set_window_position` API restores coordinates after
+  window creation. This avoids virtual-desktop-origin offsets and differences
+  in frame/client origins between platforms. If the saved top-left point is
+  outside all current screens, the window keeps normal default placement.
+  Maximized/fullscreen coordinates are ignored; sizes still come from tmux.
+- File persistence is intended for one WezTerm process managing a layout.
+  Concurrent processes can overwrite each other's layout file; per-process
+  locking/merging and restoration after recreating the remote server are deferred.
+
+Follow-up validation on macOS:
+
+- Updated `wezterm-gui` and `wezterm` debug binaries built successfully with the
+  same SDK C++ header override documented above.
+- `cargo test -p mux --lib -- --test-threads=1`: all 7 tests passed, including
+  the exit regression, file round-trip with negative coordinates and distinct
+  remote identities, file replacement, and invalid-file fallback.
+- A fresh disposable local tmux server with three windows attached through
+  actual `-CC` to the rebuilt GUI. The official CLI reported three distinct
+  mux windows. Closing all local panes with `wezterm cli kill-pane` caused
+  WezTerm to exit normally with status 0 within the test timeout. The remote
+  tmux server still had all three windows afterward. No external signal was
+  required for that successful run; test resources were cleaned up.
+- macOS Cmd+Q/menu confirmation and physical drag/restoration remain manual
+  checks because the GUI automation tool does not allow this application.
+  Windows build and Windows 11 GUI checks remain unperformed.
+
+The user subsequently confirmed on macOS that both application exit and
+window position restoration work with the updated build.
+
+Manual follow-up with the existing SSH launch command:
+
+1. Launch the rebuilt binary with `tmux_window_per_os_window=true` and attach
+   to the existing disposable session. Move the three windows to distinct
+   locations and wait at least one second after the last move.
+2. Quit with Cmd+Q and accept the confirmation. Confirm that the terminal
+   returns to its prompt without Ctrl+Z or killing the process.
+3. Repeat the same launch command and confirm the three window positions.
+4. Rename/reorder one tmux window and repeat; its placement should follow its
+   window ID. Disconnect a monitor and repeat; off-screen saved positions
+   should fall back to normal placement. Repeat these checks on Windows 11.

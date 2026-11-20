@@ -802,14 +802,27 @@ impl TermWindow {
         let mut y = None;
         let mut origin = GeometryOrigin::default();
 
+        // Saved tmux positions are absolute client-area coordinates. Apply
+        // them with WindowOps after creation: initial geometry is relative to
+        // the virtual desktop origin and differs across native backends.
+        let tmux_position = mux.get_window(mux_window_id).and_then(|window| {
+            if window.has_tmux_position_key() {
+                window.get_initial_position().clone()
+            } else {
+                None
+            }
+        });
+
         if let Some(position) = mux
             .get_window(mux_window_id)
             .and_then(|window| window.get_initial_position().clone())
             .or_else(|| POSITION.lock().unwrap().take())
         {
-            x.replace(position.x);
-            y.replace(position.y);
-            origin = position.origin;
+            if tmux_position.is_none() {
+                x.replace(position.x);
+                y.replace(position.y);
+                origin = position.origin;
+            }
         }
 
         let geometry = RequestedWindowGeometry {
@@ -836,6 +849,26 @@ impl TermWindow {
         )
         .await?;
         tw.borrow_mut().window.replace(window.clone());
+
+        if let Some(GuiPosition {
+            x: Dimension::Pixels(x),
+            y: Dimension::Pixels(y),
+            ..
+        }) = tmux_position
+        {
+            let point = euclid::point2(x as isize, y as isize);
+            let on_screen = Connection::get()
+                .and_then(|connection| connection.screens().ok())
+                .map_or(true, |screens| {
+                    screens
+                        .by_name
+                        .values()
+                        .any(|screen| screen.rect.contains(point))
+                });
+            if on_screen {
+                window.set_window_position(point);
+            }
+        }
 
         Self::apply_icon(&window)?;
 
@@ -907,6 +940,14 @@ impl TermWindow {
     ) -> anyhow::Result<bool> {
         log::debug!("{event:?}");
         match event {
+            WindowEvent::Moved(position) => {
+                if self.window.is_some() {
+                    if let Some(mux_window) = Mux::get().get_window(self.mux_window_id) {
+                        mux_window.record_tmux_position(position.x, position.y);
+                    }
+                }
+                Ok(true)
+            }
             WindowEvent::Destroyed => {
                 // Ensure that we cancel any overlays we had running, so
                 // that the mux can empty out, otherwise the mux keeps

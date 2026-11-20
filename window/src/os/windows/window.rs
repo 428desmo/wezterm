@@ -1557,7 +1557,21 @@ unsafe fn wm_windowposchanged(
     _wparam: WPARAM,
     _lparam: LPARAM,
 ) -> Option<LRESULT> {
-    // let pos = &*(lparam as *const WINDOWPOS);
+    let pos = &*(_lparam as *const WINDOWPOS);
+    if pos.flags & SWP_NOMOVE == 0 && IsIconic(hwnd) == 0 && IsZoomed(hwnd) == 0 {
+        let mut point: POINT = std::mem::zeroed();
+        if ClientToScreen(hwnd, &mut point) != 0 {
+            if let Some(inner) = rc_from_hwnd(hwnd) {
+                inner
+                    .borrow_mut()
+                    .events
+                    .dispatch(WindowEvent::Moved(ScreenPoint::new(
+                        point.x as isize,
+                        point.y as isize,
+                    )));
+            }
+        }
+    }
     wm_size(hwnd, 0, 0, 0)?;
     Some(0)
 }

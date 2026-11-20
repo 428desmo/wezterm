@@ -46,6 +46,7 @@ pub mod tab;
 pub mod termwiztermtab;
 pub mod tmux;
 pub mod tmux_commands;
+pub mod tmux_layout;
 mod tmux_pty;
 pub mod window;
 
@@ -760,6 +761,7 @@ impl Mux {
     }
 
     pub fn shutdown() {
+        crate::tmux_layout::flush();
         MUX.lock().take();
     }
 

@@ -78,7 +78,8 @@ impl MyWindow {
                     win.finish_frame(frame).unwrap();
                 }
             }
-            WindowEvent::AppearanceChanged(_)
+            WindowEvent::Moved(_)
+            | WindowEvent::AppearanceChanged(_)
             | WindowEvent::AdviseDeadKeyStatus(_)
             | WindowEvent::AdviseModifiersLedStatus(_, _)
             | WindowEvent::Notification(_)

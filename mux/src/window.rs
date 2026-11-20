@@ -14,6 +14,7 @@ pub struct Window {
     workspace: String,
     title: String,
     initial_position: Option<GuiPosition>,
+    tmux_position_key: Option<String>,
 }
 
 impl Window {
@@ -27,12 +28,27 @@ impl Window {
             title: String::new(),
             workspace: workspace.unwrap_or_else(|| Mux::get().active_workspace()),
             initial_position,
+            tmux_position_key: None,
         }
     }
 
     /// Return initial position of the window.
     pub fn get_initial_position(&self) -> &Option<GuiPosition> {
         &self.initial_position
+    }
+
+    pub fn set_tmux_position_key(&mut self, key: String) {
+        self.tmux_position_key = Some(key);
+    }
+
+    pub fn has_tmux_position_key(&self) -> bool {
+        self.tmux_position_key.is_some()
+    }
+
+    pub fn record_tmux_position(&self, x: isize, y: isize) {
+        if let Some(key) = &self.tmux_position_key {
+            crate::tmux_layout::record(key, x, y);
+        }
     }
 
     /// Return current workspace.
