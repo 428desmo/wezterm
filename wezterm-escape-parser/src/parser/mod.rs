@@ -56,6 +56,8 @@ struct ParseState {
     get_tcap: Option<GetTcapBuilder>,
     #[cfg(feature = "tmux_cc")]
     tmux_state: Option<RefCell<crate::tmux_cc::Parser>>,
+    #[cfg(feature = "tmux_cc")]
+    tmux_fallback: Option<Vec<u8>>,
 }
 
 /// The `Parser` struct holds the state machine that is used to decode
@@ -85,45 +87,94 @@ impl Parser {
 
     /// advance with tmux parser, bypass VTParse
     #[cfg(feature = "tmux_cc")]
-    fn advance_tmux_bytes(&mut self, bytes: &[u8]) -> crate::Result<Vec<Event>> {
+    fn advance_tmux_bytes(&mut self, bytes: &[u8]) -> (Vec<Event>, usize, Option<Vec<u8>>) {
         let parser_state = self.state.borrow();
         let tmux_state = parser_state.tmux_state.as_ref().unwrap();
         let mut tmux_parser = tmux_state.borrow_mut();
-        return tmux_parser.advance_bytes(bytes);
+        let mut events = vec![];
+        for (index, &byte) in bytes.iter().enumerate() {
+            // Do not bypass VTParse for the DCS terminator or cancellation.
+            // These may arrive without %exit (for example during shutdown).
+            if matches!(byte, 0x1b | 0x9c | 0x18 | 0x1a) {
+                return (events, index, None);
+            }
+            match tmux_parser.advance_byte(byte) {
+                Ok(Some(event)) => {
+                    let exited = matches!(event, Event::Exit { .. });
+                    events.push(event);
+                    if exited {
+                        return (events, index + 1, None);
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let mut output = err.to_string().into_bytes();
+                    output.push(byte);
+                    return (events, index + 1, Some(output));
+                }
+            }
+        }
+        (events, bytes.len(), None)
     }
 
     pub fn parse<F: FnMut(Action)>(&mut self, bytes: &[u8], mut callback: F) {
         #[cfg(feature = "tmux_cc")]
-        let is_tmux_mode: bool = self.state.borrow().tmux_state.is_some();
+        let mut bytes = bytes;
         #[cfg(feature = "tmux_cc")]
-        if is_tmux_mode {
-            match self.advance_tmux_bytes(bytes) {
-                Ok(tmux_events) => {
-                    callback(Action::DeviceControl(DeviceControlMode::TmuxEvents(
-                        Box::new(tmux_events),
-                    )));
-                }
-                Err(err_buf) => {
-                    // capture bytes cannot be parsed
-                    let unparsed_str = err_buf.to_string().to_owned();
-                    let mut parser_state = self.state.borrow_mut();
-                    parser_state.tmux_state = None;
-                    let mut perform = Performer {
-                        callback: &mut callback,
-                        state: &mut parser_state,
-                    };
-                    self.state_machine
-                        .parse(unparsed_str.as_bytes(), &mut perform);
-                }
+        if self.state.borrow().tmux_state.is_some() {
+            let (events, consumed, fallback) = self.advance_tmux_bytes(bytes);
+            let exited = matches!(events.last(), Some(Event::Exit { .. }));
+            if !events.is_empty() {
+                callback(Action::DeviceControl(DeviceControlMode::TmuxEvents(
+                    Box::new(events),
+                )));
             }
-            return;
+            bytes = &bytes[consumed..];
+            if let Some(output) = fallback {
+                // An interrupted transport may print ordinary text without
+                // sending either %exit or ST. Leave the DCS and replay that
+                // text as terminal output, retaining preceding tmux events.
+                self.state.borrow_mut().tmux_state = None;
+                self.state_machine = VTParser::new();
+                callback(Action::DeviceControl(DeviceControlMode::Exit));
+                self.state_machine.parse(
+                    &output,
+                    &mut Performer {
+                        callback: &mut callback,
+                        state: &mut self.state.borrow_mut(),
+                    },
+                );
+            } else if exited || !bytes.is_empty() {
+                self.state.borrow_mut().tmux_state = None;
+            } else {
+                return;
+            }
         }
 
-        let mut perform = Performer {
-            callback: &mut callback,
-            state: &mut self.state.borrow_mut(),
-        };
-        self.state_machine.parse(bytes, &mut perform);
+        #[cfg(feature = "tmux_cc")]
+        {
+            let mut state = self.state.borrow_mut();
+            let mut perform = Performer {
+                callback: &mut callback,
+                state: &mut state,
+            };
+            for &byte in bytes {
+                self.state_machine.parse_byte(byte, &mut perform);
+                if let Some(output) = perform.state.tmux_fallback.take() {
+                    self.state_machine = VTParser::new();
+                    (perform.callback)(Action::DeviceControl(DeviceControlMode::Exit));
+                    self.state_machine.parse(&output, &mut perform);
+                }
+            }
+        }
+        #[cfg(not(feature = "tmux_cc"))]
+        self.state_machine.parse(
+            bytes,
+            &mut Performer {
+                callback: &mut callback,
+                state: &mut self.state.borrow_mut(),
+            },
+        );
     }
 
     /// A specialized version of the parser that halts after recognizing the
@@ -286,14 +337,22 @@ impl<'a, F: FnMut(Action)> VTActor for Performer<'a, F> {
                 match tmux_parser.advance_byte(data) {
                     Ok(optional_events) => {
                         if let Some(tmux_event) = optional_events {
+                            let exited = matches!(tmux_event, Event::Exit { .. });
                             (self.callback)(Action::DeviceControl(DeviceControlMode::TmuxEvents(
                                 Box::new(vec![tmux_event]),
                             )));
+                            if exited {
+                                drop(tmux_parser);
+                                self.state.tmux_state = None;
+                            }
                         }
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        let mut output = err.to_string().into_bytes();
+                        output.push(data);
                         drop(tmux_parser);
-                        self.state.tmux_state = None; // drop tmux state
+                        self.state.tmux_state = None;
+                        self.state.tmux_fallback = Some(output);
                     }
                 }
                 return;
@@ -303,6 +362,10 @@ impl<'a, F: FnMut(Action)> VTActor for Performer<'a, F> {
     }
 
     fn dcs_unhook(&mut self) {
+        #[cfg(feature = "tmux_cc")]
+        {
+            self.state.tmux_state = None;
+        }
         if let Some(dcs) = self.state.dcs.take() {
             (self.callback)(Action::DeviceControl(
                 DeviceControlMode::ShortDeviceControl(Box::new(dcs)),
@@ -737,6 +800,129 @@ mod test {
             actions
         );
         assert_eq!(encode(&actions), "\x1b[!p");
+    }
+
+    #[cfg(feature = "tmux_cc")]
+    #[test]
+    fn tmux_exit_returns_ssh_output_to_terminal_at_every_chunk_boundary() {
+        let input = b"\x1bP1000p%begin 1 1 0\n%end 1 1 0\n%exit\n\x1b\\Connection to test-host closed.\r\nshell$ ";
+        for split in 0..=input.len() {
+            let mut parser = Parser::new();
+            let mut actions = parser.parse_as_vec(&input[..split]);
+            actions.extend(parser.parse_as_vec(&input[split..]));
+            let events: Vec<_> = actions
+                .iter()
+                .filter_map(|action| match action {
+                    Action::DeviceControl(DeviceControlMode::TmuxEvents(events)) => {
+                        Some(events.iter())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, Event::Exit { .. }))
+                    .count(),
+                1,
+                "split={split}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Event::Guarded(_))),
+                "split={split}"
+            );
+            let printed: String = actions
+                .iter()
+                .filter_map(|action| match action {
+                    Action::Print(c) => Some(*c),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                printed, "Connection to test-host closed.shell$ ",
+                "split={split}"
+            );
+            assert!(parser.state.borrow().tmux_state.is_none());
+        }
+        let mut parser = Parser::new();
+        let mut actions = vec![];
+        for byte in input {
+            actions.extend(parser.parse_as_vec(&[*byte]));
+        }
+        assert!(parser.state.borrow().tmux_state.is_none());
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, Action::Print('C')))
+        );
+    }
+
+    #[cfg(feature = "tmux_cc")]
+    #[test]
+    fn tmux_interrupted_transport_returns_output_without_exit_notification() {
+        for terminator in ["", "\x1b\\", "\u{9c}"] {
+            // Use the raw C1 ST byte, not its UTF-8 encoding.
+            let mut input = b"\x1bP1000p%begin 1 1 0\n%end 1 1 0\n".to_vec();
+            if terminator == "\u{9c}" {
+                input.push(0x9c);
+            } else {
+                input.extend_from_slice(terminator.as_bytes());
+            }
+            input.extend_from_slice(b"Connection to test-host closed.\r\nshell$ tail");
+            for split in 0..=input.len() {
+                let mut parser = Parser::new();
+                let mut actions = parser.parse_as_vec(&input[..split]);
+                actions.extend(parser.parse_as_vec(&input[split..]));
+                let printed: String = actions
+                    .iter()
+                    .filter_map(|action| match action {
+                        Action::Print(c) => Some(*c),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    printed, "Connection to test-host closed.shell$ tail",
+                    "terminator={terminator:?} split={split}"
+                );
+                assert!(
+                    actions.iter().any(|action| matches!(
+                        action,
+                        Action::DeviceControl(DeviceControlMode::Exit)
+                    )),
+                    "split={split}"
+                );
+                let guarded = actions
+                    .iter()
+                    .filter_map(|action| match action {
+                        Action::DeviceControl(DeviceControlMode::TmuxEvents(events)) => {
+                            Some(events.iter())
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter(|event| matches!(event, Event::Guarded(_)))
+                    .count();
+                assert_eq!(guarded, 1, "split={split}");
+                assert!(parser.state.borrow().tmux_state.is_none());
+            }
+            let mut parser = Parser::new();
+            let mut actions = vec![];
+            for byte in input {
+                actions.extend(parser.parse_as_vec(&[byte]));
+            }
+            let printed: String = actions
+                .iter()
+                .filter_map(|action| match action {
+                    Action::Print(c) => Some(*c),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(printed, "Connection to test-host closed.shell$ tail");
+            assert!(parser.state.borrow().tmux_state.is_none());
+        }
     }
 
     #[test]

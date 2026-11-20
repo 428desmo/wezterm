@@ -969,7 +969,13 @@ impl Parser {
             }
             Ok(event) => Some(event),
             Err(err) => {
-                log::error!("Unrecognized tmux cc line: {}", err);
+                if self.buffer.first() == Some(&b'%') {
+                    log::error!("Unrecognized tmux cc line: {}", err);
+                } else {
+                    // SSH can report its termination before tmux has sent
+                    // %exit, especially when the GUI closes the transport.
+                    log::debug!("Leaving tmux control mode for terminal output");
+                }
                 bail!("{}", String::from_utf8_lossy(&self.buffer));
             }
         };

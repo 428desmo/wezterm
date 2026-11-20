@@ -410,3 +410,66 @@ before this change, so these automated moves do not establish reproduction of
 every notification sequence from an interactive mouse drag. Please check the
 user's actual saved layout with a drag to each display, then deliberately
 resize an edge and verify that the new grid persists. Windows remains untested.
+
+## Follow-up: return to terminal parsing after tmux exit
+
+The escape parser previously kept its fast tmux-control path active after the
+`%exit` record. A following DCS terminator and ordinary transport output (such
+as SSH's connection-closed message) could then produce an `Unrecognized tmux cc
+line` error. The bulk path now stops at `%exit`, delivers preceding events and
+the exit event, clears control-mode state, and feeds remaining bytes through
+VTParse. The byte-at-a-time DCS path also clears control mode at `%exit`, and
+DCS unhook clears any remaining tmux state.
+
+Validation: all 59 escape-parser tests with `tmux_cc,std` passed. The regression
+test tries every two-chunk split of a control stream ending with `%exit`, its
+DCS terminator, a synthetic connection-closed message and shell prompt, plus
+single-byte input. It verifies delivery of guarded responses and exit, normal
+printing of transport text, and cleared tmux state. The Mac debug GUI build
+passed. In a disposable local three-window tmux session, a local shell wrapper
+printed a synthetic SSH-style message after detach; the GUI's control pane
+showed that text, no unrecognized-control-line error was logged, normal GUI
+exit succeeded, and all three server-side windows remained. No SSH server was
+contacted. Windows build/GUI remain untested.
+
+The separate macOS `IMKCFRunLoopWakeUpReliable` diagnostic is not changed by
+this parser fix. No input-method disabling or process-wide log suppression was
+added. If desired, append `2>>"$HOME/Library/Logs/wezterm-launch.log"` to the
+existing terminal launch command to retain native stderr in a file instead
+of the launching terminal; this routes all stderr, not just that diagnostic.
+
+## Follow-up: interrupted transport output during application quit
+
+The user clarified that the remaining connection-closed parse error occurred
+when confirming Cmd-Q, rather than explicitly detaching. The previous fix
+required `%exit` and therefore did not cover ordinary transport text arriving
+before (or without) that notification. The fast control path also bypassed
+VTParse's handling of ST and DCS cancellation.
+
+The fast path now yields to VTParse at a DCS terminator/cancellation. If a line
+outside a guarded response is ordinary non-`%` text, the control parser returns
+it for normal terminal parsing at debug severity rather than reporting an
+unrecognized protocol command. Malformed `%` records retain error logging.
+Both input paths reset to normal terminal parsing, replay the text and emit
+DeviceControl Exit so the mux detaches the control domain. Events preceding
+the fallback in the same read are retained, and unread trailing bytes are not
+lost. This handles transport termination without matching an SSH hostname or
+silencing arbitrary protocol errors.
+
+Validation on Mac:
+
+- All 60 escape-parser tests passed. The new regression covers missing `%exit`
+  with no terminator, ESC-backslash ST and C1 ST at every two-chunk boundary and
+  with single-byte reads. It checks normal text rendering, domain-exit delivery
+  and preservation of preceding guarded responses.
+- The debug GUI build passed.
+- A local tmux client was forcibly killed while its tmux server remained alive;
+  a shell wrapper then printed a synthetic SSH-style connection-closed message.
+  The control pane displayed the text, detached its domain and logged no
+  unrecognized-control-line error. Normal GUI exit and remote window survival
+  were verified.
+- A separate disposable GUI invoked QuitApplication with NeverPrompt, exercising
+  the termination path without automating the confirmation UI. It exited with
+  status 0, logged no control parse error and left all three tmux windows alive.
+  An actual Cmd-Q/Yes interaction over the user's SSH connection remains for
+  user verification; neither that SSH host nor the production server was used.
