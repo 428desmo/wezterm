@@ -491,8 +491,19 @@ impl TmuxDomainState {
                 }
             }
 
-            mux.add_tab_to_window(&tab, **gui_window_id)?;
-            gui_window_id.notify();
+            if self.window_per_os_window {
+                // Use the transport window's workspace, even if focus changed
+                // while the remote window list was being fetched.
+                let workspace = mux
+                    .get_window(**gui_window_id)
+                    .map(|w| w.get_workspace().to_string());
+                let mut window_builder = mux.new_empty_window(workspace, None);
+                mux.add_tab_to_window(&tab, *window_builder)?;
+                window_builder.notify();
+            } else {
+                mux.add_tab_to_window(&tab, **gui_window_id)?;
+                gui_window_id.notify();
+            }
 
             let gui_tabs = self.gui_tabs.lock();
             let local_tab = match gui_tabs.get(&window.window_id) {

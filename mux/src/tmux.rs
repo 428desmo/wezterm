@@ -76,6 +76,8 @@ pub(crate) struct TmuxDomainState {
     pub attach_state: Mutex<AttachState>,
     pending_splits: Mutex<VecDeque<promise::Promise<TmuxPaneId>>>,
     pub backlog: Mutex<HashMap<TmuxPaneId, Vec<u8>>>,
+    // Snapshot at attach so a config reload cannot change the mapping mid-session.
+    pub window_per_os_window: bool,
 }
 
 pub struct TmuxDomain {
@@ -350,6 +352,7 @@ impl TmuxDomain {
             attach_state: Mutex::new(AttachState::Init),
             pending_splits: Mutex::new(VecDeque::default()),
             backlog: Mutex::new(HashMap::default()),
+            window_per_os_window: config::configuration().tmux_window_per_os_window,
         });
 
         Self { inner }

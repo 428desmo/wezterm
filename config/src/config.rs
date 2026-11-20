@@ -139,6 +139,10 @@ pub struct Config {
     #[dynamic(default)]
     pub prefer_to_spawn_tabs: bool,
 
+    /// Open each tmux control-mode window in its own native window.
+    #[dynamic(default)]
+    pub tmux_window_per_os_window: bool,
+
     #[dynamic(default)]
     pub window_frame: WindowFrameConfig,
 
