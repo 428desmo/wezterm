@@ -100,6 +100,60 @@ impl SoftwareVersion {
 }
 
 impl ConnectionOps for Connection {
+    fn placement_screens(&self) -> anyhow::Result<Vec<crate::screen::PlacementScreen>> {
+        use core_foundation::base::{CFRelease, TCFType};
+        use core_foundation::string::CFString;
+        use core_foundation::uuid::{CFUUIDCreateString, CFUUIDRef};
+        #[link(name = "ColorSync", kind = "framework")]
+        extern "C" {
+            fn CGDisplayCreateUUIDFromDisplayID(display: u32) -> CFUUIDRef;
+        }
+        unsafe {
+            let screens = NSScreen::screens(nil);
+            let primary = screens.objectAtIndex(0);
+            let primary_frame = NSScreen::frame(primary);
+            let backing = NSScreen::convertRectToBacking_(primary, primary_frame);
+            // Match cartesian_to_screen_point and screen_point_to_cartesian.
+            let scale = backing.size.height / primary_frame.size.height;
+            let mut result = vec![];
+            for index in 0..screens.count() {
+                let screen = screens.objectAtIndex(index);
+                let description: id = msg_send![screen, deviceDescription];
+                let number: id =
+                    msg_send![description, objectForKey: super::nsstring("NSScreenNumber")];
+                let display: u32 = msg_send![number, unsignedIntValue];
+                let uuid = CGDisplayCreateUUIDFromDisplayID(display);
+                let id = if uuid.is_null() {
+                    format!("mac-display-{display}")
+                } else {
+                    let text = CFUUIDCreateString(std::ptr::null(), uuid);
+                    let text = CFString::wrap_under_create_rule(text).to_string();
+                    CFRelease(uuid as _);
+                    format!("mac-display-{text}")
+                };
+                let frame = NSScreen::frame(screen);
+                let screen_backing = NSScreen::convertRectToBacking_(screen, frame);
+                let backing_scale = screen_backing.size.width / frame.size.width;
+                let dpi = nsscreen_to_screen_info(screen)
+                    .effective_dpi
+                    .unwrap_or(crate::DEFAULT_DPI * backing_scale);
+                result.push(crate::screen::PlacementScreen {
+                    id,
+                    dpi,
+                    backing_scale,
+                    rect: euclid::rect(
+                        (frame.origin.x * scale) as isize,
+                        ((primary_frame.size.height - frame.origin.y - frame.size.height) * scale)
+                            as isize,
+                        (frame.size.width * scale) as isize,
+                        (frame.size.height * scale) as isize,
+                    ),
+                });
+            }
+            Ok(result)
+        }
+    }
+
     fn name(&self) -> String {
         if let Ok(vers) = SoftwareVersion::load() {
             format!(

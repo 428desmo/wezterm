@@ -117,6 +117,8 @@ pub enum MouseCapture {
 /// Type used together with Window::notify to do something in the
 /// context of the window-specific event loop
 pub enum TermWindowNotif {
+    RestoreTmuxWindowPosition,
+    FinishTmuxWindowRestore,
     InvalidateShapeCache,
     PerformAssignment {
         pane_id: PaneId,
@@ -375,6 +377,11 @@ pub struct TermWindow {
     pub dimensions: Dimensions,
     pub window_state: WindowState,
     pub resizes_pending: usize,
+    // Preserve tmux's grid while native creation, positioning and backing-scale
+    // notifications settle. Intermediate pixel geometry must not resize tmux.
+    tmux_restore_cells: Option<resize::RowsAndCols>,
+    tmux_restore_finishing: bool,
+    tmux_control_size_restored: bool,
     is_repaint_pending: bool,
     pending_scale_changes: LinkedList<resize::ScaleChange>,
     /// Terminal dimensions
@@ -586,9 +593,88 @@ impl TermWindow {
 }
 
 impl TermWindow {
+    fn saved_tmux_placement(
+        mux_window_id: MuxWindowId,
+    ) -> Option<(ScreenPoint, ::window::screen::PlacementScreen)> {
+        let screens = Connection::get()?.placement_screens().ok()?;
+        let displays: Vec<_> = screens
+            .iter()
+            .map(|screen| mux::tmux_layout::DisplayInfo {
+                id: screen.id.clone(),
+                x: screen.rect.origin.x,
+                y: screen.rect.origin.y,
+                width: screen.rect.width(),
+                height: screen.rect.height(),
+            })
+            .collect();
+        let position = Mux::get().get_window(mux_window_id).and_then(|window| {
+            window
+                .tmux_position_key()
+                .and_then(|key| mux::tmux_layout::restore(key, &displays))
+        })?;
+        if let GuiPosition {
+            x: Dimension::Pixels(x),
+            y: Dimension::Pixels(y),
+            ..
+        } = position
+        {
+            let point = euclid::point2(x as isize, y as isize);
+            let screen = screens
+                .into_iter()
+                .find(|screen| screen.rect.contains(point))?;
+            Some((point, screen))
+        } else {
+            None
+        }
+    }
+
+    fn record_tmux_control_size(&self) {
+        if !self.tmux_control_size_restored || self.tmux_restore_cells.is_some() {
+            return;
+        }
+        if let Some(key) = Mux::get()
+            .get_window(self.mux_window_id)
+            .and_then(|window| window.tmux_position_key().map(str::to_owned))
+            .filter(|key| key.ends_with(":control"))
+        {
+            mux::tmux_layout::record_size(&key, self.terminal_size.rows, self.terminal_size.cols);
+        }
+    }
+
+    fn restore_tmux_window_position(&mut self, window: &Window) {
+        if let Some((point, _)) = Self::saved_tmux_placement(self.mux_window_id) {
+            let cells = self.current_cell_dimensions();
+            self.tmux_restore_cells.get_or_insert(cells);
+            window.set_window_position(point);
+        }
+        let control_key = Mux::get()
+            .get_window(self.mux_window_id)
+            .and_then(|window| window.tmux_position_key().map(str::to_owned))
+            .filter(|key| key.ends_with(":control"));
+        if let Some(key) = control_key {
+            if let Some((rows, cols)) = mux::tmux_layout::restore_size(&key) {
+                self.tmux_restore_cells = Some(resize::RowsAndCols { rows, cols });
+                self.scaling_changed(self.dimensions, self.fonts.get_font_scale(), window);
+            }
+            self.tmux_control_size_restored = true;
+            self.record_tmux_control_size();
+        }
+    }
+
     pub async fn new_window(mux_window_id: MuxWindowId) -> anyhow::Result<()> {
         let config = configuration();
-        let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi()) as usize;
+        // A restored native tmux window must use its destination's font DPI
+        // before computing its pixel size, not the currently focused screen's.
+        let saved_placement = if cfg!(target_os = "macos") {
+            Self::saved_tmux_placement(mux_window_id)
+        } else {
+            None
+        };
+        let dpi = config.dpi.unwrap_or_else(|| {
+            saved_placement
+                .as_ref()
+                .map_or_else(|| ::window::default_dpi(), |(_, screen)| screen.dpi)
+        }) as usize;
         let fontconfig = Rc::new(FontConfiguration::new(Some(config.clone()), dpi)?);
 
         let mux = Mux::get();
@@ -601,6 +687,9 @@ impl TermWindow {
         };
         let physical_rows = size.rows as usize;
         let physical_cols = size.cols as usize;
+        let native_tmux = mux
+            .get_window(mux_window_id)
+            .map_or(false, |window| window.has_tmux_position_key());
 
         let render_metrics = RenderMetrics::new(&fontconfig)?;
         log::trace!("using render_metrics {:#?}", render_metrics);
@@ -706,6 +795,12 @@ impl TermWindow {
             dimensions,
             window_state: WindowState::default(),
             resizes_pending: 0,
+            tmux_restore_cells: native_tmux.then_some(resize::RowsAndCols {
+                rows: physical_rows,
+                cols: physical_cols,
+            }),
+            tmux_restore_finishing: false,
+            tmux_control_size_restored: false,
             is_repaint_pending: false,
             pending_scale_changes: LinkedList::new(),
             terminal_size,
@@ -802,27 +897,14 @@ impl TermWindow {
         let mut y = None;
         let mut origin = GeometryOrigin::default();
 
-        // Saved tmux positions are absolute client-area coordinates. Apply
-        // them with WindowOps after creation: initial geometry is relative to
-        // the virtual desktop origin and differs across native backends.
-        let tmux_position = mux.get_window(mux_window_id).and_then(|window| {
-            if window.has_tmux_position_key() {
-                window.get_initial_position().clone()
-            } else {
-                None
-            }
-        });
-
         if let Some(position) = mux
             .get_window(mux_window_id)
             .and_then(|window| window.get_initial_position().clone())
             .or_else(|| POSITION.lock().unwrap().take())
         {
-            if tmux_position.is_none() {
-                x.replace(position.x);
-                y.replace(position.y);
-                origin = position.origin;
-            }
+            x.replace(position.x);
+            y.replace(position.y);
+            origin = position.origin;
         }
 
         let geometry = RequestedWindowGeometry {
@@ -831,7 +913,25 @@ impl TermWindow {
             x,
             y,
             origin,
+            initial_placement: saved_placement.as_ref().map(|(position, screen)| {
+                InitialWindowPlacement {
+                    position: *position,
+                    backing_scale: screen.backing_scale,
+                }
+            }),
         };
+        if let Some((point, screen)) = &saved_placement {
+            log::info!(
+                "Restoring tmux window {} at {:?}: display={} dpi={} backing_scale={} grid={}x{}",
+                mux_window_id,
+                point,
+                screen.id,
+                dpi,
+                screen.backing_scale,
+                physical_cols,
+                physical_rows
+            );
+        }
         log::trace!("{:?}", geometry);
 
         let window = Window::new_window(
@@ -850,24 +950,8 @@ impl TermWindow {
         .await?;
         tw.borrow_mut().window.replace(window.clone());
 
-        if let Some(GuiPosition {
-            x: Dimension::Pixels(x),
-            y: Dimension::Pixels(y),
-            ..
-        }) = tmux_position
-        {
-            let point = euclid::point2(x as isize, y as isize);
-            let on_screen = Connection::get()
-                .and_then(|connection| connection.screens().ok())
-                .map_or(true, |screens| {
-                    screens
-                        .by_name
-                        .values()
-                        .any(|screen| screen.rect.contains(point))
-                });
-            if on_screen {
-                window.set_window_position(point);
-            }
+        if saved_placement.is_none() {
+            tw.borrow_mut().restore_tmux_window_position(&window);
         }
 
         Self::apply_icon(&window)?;
@@ -928,6 +1012,9 @@ impl TermWindow {
         }
 
         crate::update::start_update_checker();
+        if native_tmux {
+            window.notify(TermWindowNotif::FinishTmuxWindowRestore);
+        }
         front_end().record_known_window(window, mux_window_id);
 
         Ok(())
@@ -943,7 +1030,27 @@ impl TermWindow {
             WindowEvent::Moved(position) => {
                 if self.window.is_some() {
                     if let Some(mux_window) = Mux::get().get_window(self.mux_window_id) {
-                        mux_window.record_tmux_position(position.x, position.y);
+                        if mux_window.has_tmux_position_key() {
+                            let display = Connection::get()
+                                .and_then(|connection| connection.placement_screens().ok())
+                                .and_then(|screens| {
+                                    screens
+                                        .into_iter()
+                                        .find(|screen| screen.rect.contains(position))
+                                })
+                                .map(|screen| mux::tmux_layout::DisplayInfo {
+                                    id: screen.id,
+                                    x: screen.rect.origin.x,
+                                    y: screen.rect.origin.y,
+                                    width: screen.rect.width(),
+                                    height: screen.rect.height(),
+                                });
+                            mux_window.record_tmux_position(
+                                position.x,
+                                position.y,
+                                display.as_ref(),
+                            );
+                        }
                     }
                 }
                 Ok(true)
@@ -1006,6 +1113,11 @@ impl TermWindow {
             }
             WindowEvent::SetInnerSizeCompleted => {
                 self.resizes_pending -= 1;
+                if self.tmux_restore_finishing && self.resizes_pending == 0 {
+                    self.tmux_restore_cells = None;
+                    self.tmux_restore_finishing = false;
+                    self.record_tmux_control_size();
+                }
                 if self.is_repaint_pending {
                     self.is_repaint_pending = false;
                     if self.webgpu.is_some() {
@@ -1157,6 +1269,17 @@ impl TermWindow {
         }
 
         match notif {
+            TermWindowNotif::RestoreTmuxWindowPosition => {
+                self.restore_tmux_window_position(window);
+                window.notify(TermWindowNotif::FinishTmuxWindowRestore);
+            }
+            TermWindowNotif::FinishTmuxWindowRestore => {
+                self.tmux_restore_finishing = self.resizes_pending > 0;
+                if !self.tmux_restore_finishing {
+                    self.tmux_restore_cells = None;
+                    self.record_tmux_control_size();
+                }
+            }
             TermWindowNotif::InvalidateShapeCache => {
                 self.shape_generation += 1;
                 self.shape_cache.borrow_mut().clear();
@@ -1406,7 +1529,14 @@ impl TermWindow {
 
     fn set_inner_size(&mut self, window: &Window, width: usize, height: usize) {
         self.resizes_pending += 1;
-        window.set_inner_size(width, height);
+        if Mux::get()
+            .get_window(self.mux_window_id)
+            .map_or(false, |window| window.has_tmux_position_key())
+        {
+            window.set_inner_size_with_dpi(width, height, self.dimensions.dpi);
+        } else {
+            window.set_inner_size(width, height);
+        }
     }
 
     /// Take care to remove our panes from the mux, otherwise

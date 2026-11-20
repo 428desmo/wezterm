@@ -1,6 +1,16 @@
 use crate::ScreenRect;
 use std::collections::HashMap;
 
+/// Screen identity and bounds in the same top-left coordinate system as
+/// WindowOps::set_window_position (unlike native Cocoa screen frames).
+#[derive(Debug, Clone)]
+pub struct PlacementScreen {
+    pub id: String,
+    pub rect: ScreenRect,
+    pub dpi: f64,
+    pub backing_scale: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Screens {
     pub main: ScreenInfo,

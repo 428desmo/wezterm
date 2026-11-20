@@ -278,6 +278,13 @@ pub trait WindowOps {
     /// Resize the inner or client area of the window
     fn set_inner_size(&self, width: usize, height: usize);
 
+    /// Resize pixels computed at `dpi`. Backends may reject a request if the
+    /// backing DPI changed while it was queued and report fresh dimensions.
+    /// Completion is still delivered for rejected requests.
+    fn set_inner_size_with_dpi(&self, width: usize, height: usize, _dpi: usize) {
+        self.set_inner_size(width, height);
+    }
+
     /// Use for windows snap layouts
     fn set_maximize_button_position(&self, _rect: ScreenRect) {}
 
@@ -346,6 +353,14 @@ pub trait WindowOps {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct InitialWindowPlacement {
+    /// Absolute client-area top-left, in WindowOps screen coordinates.
+    pub position: ScreenPoint,
+    /// Physical backing pixels per native logical point, independent of font DPI.
+    pub backing_scale: f64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RequestedWindowGeometry {
     pub width: Dimension,
@@ -355,6 +370,8 @@ pub struct RequestedWindowGeometry {
     /// Specifies basis for evaluating x/y coords.
     /// Also applies to width/height when computing % based dimensions
     pub origin: GeometryOrigin,
+    /// Optional destination screen hint for native creation (macOS).
+    pub initial_placement: Option<InitialWindowPlacement>,
 }
 
 #[derive(Debug, Clone)]

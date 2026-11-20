@@ -91,7 +91,17 @@ impl GuiFrontEnd {
                 MuxNotification::TabResized(_) => {}
                 MuxNotification::TabAddedToWindow { .. } => {}
                 MuxNotification::PaneRemoved(_) => {}
-                MuxNotification::WindowInvalidated(_) => {}
+                MuxNotification::WindowInvalidated(window_id) => {
+                    promise::spawn::spawn_into_main_thread(async move {
+                        let fe = crate::frontend::front_end();
+                        for (window, id) in fe.known_windows.borrow().iter() {
+                            if *id == window_id {
+                                fe.restore_placement_if_requested(window, window_id);
+                            }
+                        }
+                    })
+                    .detach();
+                }
                 MuxNotification::PaneOutput(_) => {}
                 MuxNotification::PaneAdded(_) => {}
                 MuxNotification::Alert {
@@ -469,10 +479,24 @@ impl GuiFrontEnd {
         self.reconcile_workspace();
     }
 
+    fn restore_placement_if_requested(&self, window: &Window, mux_window_id: MuxWindowId) {
+        let requested = Mux::get()
+            .get_window_mut(mux_window_id)
+            .map_or(false, |mut window| {
+                window.take_tmux_position_restore_request()
+            });
+        if requested {
+            window.notify(TermWindowNotif::RestoreTmuxWindowPosition);
+        }
+    }
+
     pub fn record_known_window(&self, window: Window, mux_window_id: MuxWindowId) {
         self.known_windows
             .borrow_mut()
-            .insert(window, mux_window_id);
+            .insert(window.clone(), mux_window_id);
+        // The remote session can become known while the GUI is still being
+        // created. Do not lose that late-bound transport placement request.
+        self.restore_placement_if_requested(&window, mux_window_id);
         if !self.is_switching_workspace() {
             self.reconcile_workspace();
         }

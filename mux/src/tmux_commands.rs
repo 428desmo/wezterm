@@ -371,6 +371,23 @@ impl TmuxDomainState {
             }
         };
 
+        if self.window_per_os_window {
+            if let Some(remote) = windows.iter().find(|w| w.session_id == current_session) {
+                let prefix = remote
+                    .position_key
+                    .rsplit_once(':')
+                    .map(|(prefix, _)| prefix)
+                    .unwrap_or(&remote.position_key);
+                let key = format!("{prefix}:session-{current_session}:control");
+                if let Some(mut control) = mux.get_window_mut(**gui_window_id) {
+                    if control.tmux_position_key() != Some(key.as_str()) {
+                        control.set_tmux_position_key(key);
+                        control.request_tmux_position_restore();
+                    }
+                }
+            }
+        }
+
         for window in windows.iter() {
             if window.session_id != current_session {
                 continue;
@@ -498,8 +515,7 @@ impl TmuxDomainState {
                 let workspace = mux
                     .get_window(**gui_window_id)
                     .map(|w| w.get_workspace().to_string());
-                let position = crate::tmux_layout::restore(&window.position_key);
-                let mut window_builder = mux.new_empty_window(workspace, position);
+                let mut window_builder = mux.new_empty_window(workspace, None);
                 if let Some(mut local_window) = mux.get_window_mut(*window_builder) {
                     local_window.set_tmux_position_key(window.position_key.clone());
                 }
@@ -1261,6 +1277,16 @@ mod native_window_tests {
                 let transport = transport.as_ref().unwrap();
                 assert!(transport.notified);
                 assert!(transport.activity.is_none());
+                let mut control = mux.get_window_mut(**transport).unwrap();
+                assert_eq!(control.has_tmux_position_key(), native);
+                if native {
+                    assert_eq!(
+                        control.tmux_position_key(),
+                        Some("test-only:session-0:control")
+                    );
+                    assert!(control.take_tmux_position_restore_request());
+                    assert!(!control.take_tmux_position_restore_request());
+                }
             }
             let tabs = domain.inner.gui_tabs.lock();
             let window_ids: HashSet<_> = tabs

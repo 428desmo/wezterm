@@ -15,6 +15,7 @@ pub struct Window {
     title: String,
     initial_position: Option<GuiPosition>,
     tmux_position_key: Option<String>,
+    tmux_position_restore_requested: bool,
 }
 
 impl Window {
@@ -29,6 +30,7 @@ impl Window {
             workspace: workspace.unwrap_or_else(|| Mux::get().active_workspace()),
             initial_position,
             tmux_position_key: None,
+            tmux_position_restore_requested: false,
         }
     }
 
@@ -45,9 +47,27 @@ impl Window {
         self.tmux_position_key.is_some()
     }
 
-    pub fn record_tmux_position(&self, x: isize, y: isize) {
+    pub fn tmux_position_key(&self) -> Option<&str> {
+        self.tmux_position_key.as_deref()
+    }
+
+    pub fn request_tmux_position_restore(&mut self) {
+        self.tmux_position_restore_requested = true;
+        Mux::get().notify(MuxNotification::WindowInvalidated(self.id));
+    }
+
+    pub fn take_tmux_position_restore_request(&mut self) -> bool {
+        std::mem::take(&mut self.tmux_position_restore_requested)
+    }
+
+    pub fn record_tmux_position(
+        &self,
+        x: isize,
+        y: isize,
+        display: Option<&crate::tmux_layout::DisplayInfo>,
+    ) {
         if let Some(key) = &self.tmux_position_key {
-            crate::tmux_layout::record(key, x, y);
+            crate::tmux_layout::record(key, x, y, display);
         }
     }
 

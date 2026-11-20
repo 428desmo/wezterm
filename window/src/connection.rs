@@ -27,6 +27,20 @@ pub enum ApplicationEvent {
 }
 
 pub trait ConnectionOps {
+    fn placement_screens(&self) -> anyhow::Result<Vec<crate::screen::PlacementScreen>> {
+        Ok(self
+            .screens()?
+            .by_name
+            .into_values()
+            .map(|screen| crate::screen::PlacementScreen {
+                dpi: screen.effective_dpi.unwrap_or(crate::DEFAULT_DPI),
+                backing_scale: screen.scale,
+                id: screen.name,
+                rect: screen.rect,
+            })
+            .collect())
+    }
+
     fn get() -> Option<Rc<Connection>> {
         let mut res = None;
         CONN.with(|m| {

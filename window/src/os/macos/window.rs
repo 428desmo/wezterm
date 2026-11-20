@@ -431,6 +431,33 @@ pub struct Window {
 unsafe impl Send for Window {}
 unsafe impl Sync for Window {}
 
+fn content_size_for_backing_pixels(width: usize, height: usize, backing_scale: f64) -> NSSize {
+    let scale = if backing_scale.is_finite() && backing_scale > 0.0 {
+        backing_scale
+    } else {
+        1.0
+    };
+    NSSize::new(width as f64 / scale, height as f64 / scale)
+}
+
+#[cfg(test)]
+mod restored_backing_size_tests {
+    use super::*;
+
+    #[test]
+    fn restore_uses_destination_backing_scale_in_both_directions() {
+        // The same 80-column grid at 7px/14px per cell occupies 560 logical
+        // points on low-DPI/Retina screens; neither source screen is involved.
+        let low = content_size_for_backing_pixels(560, 384, 1.0);
+        let retina = content_size_for_backing_pixels(1120, 768, 2.0);
+        assert_eq!((low.width, low.height), (560.0, 384.0));
+        assert_eq!((retina.width, retina.height), (560.0, 384.0));
+        // Explicit font DPI need not equal physical backing scale.
+        let override_dpi = content_size_for_backing_pixels(560, 384, 2.0);
+        assert_eq!((override_dpi.width, override_dpi.height), (280.0, 192.0));
+    }
+}
+
 fn set_window_position(window: *mut Object, coords: ScreenPoint) {
     unsafe {
         let cartesian = screen_point_to_cartesian(coords);
@@ -447,6 +474,43 @@ fn set_window_position(window: *mut Object, coords: ScreenPoint) {
 }
 
 impl Window {
+    fn request_inner_size(&self, width: usize, height: usize, expected_dpi: Option<usize>) {
+        Connection::with_window_inner(self.id, move |inner| {
+            let current_dpi = unsafe {
+                let frame = NSView::frame(*inner.view);
+                let backing = NSView::convertRectToBacking(*inner.view, frame);
+                dpi_for_window_screen(*inner.window, &inner.config)
+                    .unwrap_or(crate::DEFAULT_DPI * backing.size.width / frame.size.width)
+                    as usize
+            };
+            if expected_dpi.map_or(true, |dpi| dpi == current_dpi) {
+                inner.set_inner_size(width, height);
+            } else {
+                // Old- and new-DPI notifications may both be queued during a
+                // backing transition. Applying old pixels at the new scale
+                // doubles/halves the logical size and feeds another correction.
+                log::trace!(
+                    "Discarding queued resize {}x{} at {:?} dpi; backing is now {} dpi",
+                    width,
+                    height,
+                    expected_dpi,
+                    current_dpi
+                );
+                unsafe {
+                    WindowView::did_resize(&mut **inner.view, sel!(windowDidResize:), nil);
+                }
+            }
+            if let Some(window_view) = WindowView::get_this(unsafe { &**inner.view }) {
+                window_view
+                    .inner
+                    .borrow_mut()
+                    .events
+                    .dispatch(WindowEvent::SetInnerSizeCompleted);
+            }
+            Ok(())
+        });
+    }
+
     pub async fn new_window<F>(
         _class_name: &str,
         name: &str,
@@ -464,6 +528,7 @@ impl Window {
         };
 
         let conn = Connection::get().expect("new_window called on gui thread");
+        let placement = geometry.initial_placement;
         let ResolvedGeometry {
             width,
             height,
@@ -471,26 +536,53 @@ impl Window {
             y,
         } = conn.resolve_geometry(geometry);
 
-        let scale_factor = (conn.default_dpi() / crate::DEFAULT_DPI) as usize;
-        let width = width / scale_factor;
-        let height = height / scale_factor;
-        let x = x.map(|x| x / scale_factor as i32);
-        let y = y.map(|y| y / scale_factor as i32);
-
-        let initial_pos = match (x, y) {
-            (Some(x), Some(y)) => Some(ScreenPoint::new(x as isize, y as isize)),
-            _ => None,
+        let scale_factor = placement.map_or_else(
+            || (conn.default_dpi() / crate::DEFAULT_DPI) as usize as f64,
+            |placement| placement.backing_scale,
+        );
+        let content_size = if placement.is_some() {
+            content_size_for_backing_pixels(width, height, scale_factor)
+        } else {
+            // Preserve the existing rounding policy for ordinary windows.
+            NSSize::new(
+                (width / scale_factor as usize) as f64,
+                (height / scale_factor as usize) as f64,
+            )
         };
+        let x = x.map(|x| (x as f64 / scale_factor) as i32);
+        let y = y.map(|y| (y as f64 / scale_factor) as i32);
+
+        let initial_pos = placement
+            .map(|placement| placement.position)
+            .or_else(|| match (x, y) {
+                (Some(x), Some(y)) => Some(ScreenPoint::new(x as isize, y as isize)),
+                _ => None,
+            });
 
         unsafe {
             let style_mask = decoration_to_mask(
                 config.window_decorations,
                 config.integrated_title_button_style,
             );
-            let rect = NSRect::new(
-                NSPoint::new(0., 0.),
-                NSSize::new(width as f64, height as f64),
-            );
+            let rect = NSRect::new(NSPoint::new(0., 0.), content_size);
+
+            let mut target_screen = nil;
+            if let Some(placement) = placement {
+                let point = screen_point_to_cartesian(placement.position);
+                let screens = NSScreen::screens(nil);
+                for index in 0..screens.count() {
+                    let screen = screens.objectAtIndex(index);
+                    let frame = NSScreen::frame(screen);
+                    if point.x >= frame.origin.x
+                        && point.x < frame.origin.x + frame.size.width
+                        && point.y > frame.origin.y
+                        && point.y <= frame.origin.y + frame.size.height
+                    {
+                        target_screen = screen;
+                        break;
+                    }
+                }
+            }
 
             let conn = Connection::get().expect("Connection::init has not been called");
 
@@ -522,13 +614,27 @@ impl Window {
             }));
 
             let window: id = msg_send![get_window_class(), alloc];
-            let window = StrongPtr::new(NSWindow::initWithContentRect_styleMask_backing_defer_(
-                window,
-                rect,
-                style_mask,
-                NSBackingStoreBuffered,
-                NO,
-            ));
+            let window = if target_screen != nil {
+                // Bind the destination backing store before creating the view.
+                // Moving a hidden window after creation can leave its old
+                // backing scale cached until an interactive window move.
+                let window: id = msg_send![window,
+                    initWithContentRect: rect
+                    styleMask: style_mask.bits()
+                    backing: NSBackingStoreBuffered as NSUInteger
+                    defer: NO
+                    screen: target_screen
+                ];
+                StrongPtr::new(window)
+            } else {
+                StrongPtr::new(NSWindow::initWithContentRect_styleMask_backing_defer_(
+                    window,
+                    rect,
+                    style_mask,
+                    NSBackingStoreBuffered,
+                    NO,
+                ))
+            };
 
             apply_decorations_to_window(
                 &window,
@@ -810,22 +916,23 @@ impl WindowOps for Window {
     }
 
     fn set_inner_size(&self, width: usize, height: usize) {
-        Connection::with_window_inner(self.id, move |inner| {
-            inner.set_inner_size(width, height);
-            if let Some(window_view) = WindowView::get_this(unsafe { &**inner.view }) {
-                window_view
-                    .inner
-                    .borrow_mut()
-                    .events
-                    .dispatch(WindowEvent::SetInnerSizeCompleted);
-            }
-            Ok(())
-        });
+        self.request_inner_size(width, height, None);
+    }
+
+    fn set_inner_size_with_dpi(&self, width: usize, height: usize, dpi: usize) {
+        self.request_inner_size(width, height, Some(dpi));
     }
 
     fn set_window_position(&self, coords: ScreenPoint) {
         Connection::with_window_inner(self.id, move |inner| {
             inner.set_window_position(coords);
+            // A programmatic cross-screen move need not cause a drawRect.
+            // Report the destination's backing geometry now, before the GUI
+            // ends restoration, rather than waiting for a later mouse drag.
+            unsafe {
+                WindowView::did_resize(&mut **inner.view, sel!(windowDidResize:), nil);
+            }
+            inner.invalidate();
             Ok(())
         });
     }
@@ -2957,15 +3064,24 @@ impl WindowView {
         Self::key_common(this, nsevent, false);
     }
 
-    extern "C" fn did_change_screen(this: &mut Object, _sel: Sel, _notification: id) {
+    extern "C" fn did_change_screen(view: &mut Object, _sel: Sel, _notification: id) {
         log::trace!("did_change_screen");
-        if let Some(this) = Self::get_this(this) {
+        if let Some(this) = Self::get_this(view) {
             // Just set a flag; we don't want to react immediately
             // as this even fires as part of a live move and the
             // resize flow may try to re-position the window to
             // the wrong place.
             this.inner.borrow_mut().screen_changed = true;
+            // Ensure draw_rect consumes screen_changed even if the window is
+            // idle after restoring its position onto another display.
         }
+        unsafe {
+            let () = msg_send![view, setNeedsDisplay: YES];
+        }
+    }
+
+    extern "C" fn did_change_backing_properties(view: &mut Object, sel: Sel) {
+        Self::did_change_screen(view, sel, nil);
     }
 
     extern "C" fn will_start_live_resize(this: &mut Object, _sel: Sel, _notification: id) {
@@ -3313,6 +3429,10 @@ impl WindowView {
             cls.add_method(
                 sel!(makeBackingLayer),
                 Self::make_backing_layer as extern "C" fn(&mut Object, Sel) -> id,
+            );
+            cls.add_method(
+                sel!(viewDidChangeBackingProperties),
+                Self::did_change_backing_properties as extern "C" fn(&mut Object, Sel),
             );
 
             cls.add_method(

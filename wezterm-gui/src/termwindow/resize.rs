@@ -7,10 +7,109 @@ use std::rc::Rc;
 use wezterm_font::FontConfiguration;
 use wezterm_term::TerminalSize;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowsAndCols {
     pub rows: usize,
     pub cols: usize,
+}
+
+fn preserved_cells(
+    restoring: Option<RowsAndCols>,
+    current: RowsAndCols,
+    native_tmux_dpi_change: bool,
+    font_scale_changed: bool,
+    simple_dpi_change: bool,
+) -> Option<RowsAndCols> {
+    restoring.or_else(|| {
+        if native_tmux_dpi_change || font_scale_changed || simple_dpi_change {
+            Some(current)
+        } else {
+            None
+        }
+    })
+}
+
+fn tmux_resize_guard(
+    restoring: Option<RowsAndCols>,
+    current: RowsAndCols,
+    native_tmux: bool,
+    dpi_changed: bool,
+    live_resizing: bool,
+) -> Option<RowsAndCols> {
+    if live_resizing {
+        None
+    } else if native_tmux && dpi_changed {
+        restoring.or(Some(current))
+    } else {
+        restoring
+    }
+}
+
+#[cfg(test)]
+mod tmux_dpi_tests {
+    use super::*;
+
+    #[test]
+    fn monitor_transition_keeps_grid_through_same_dpi_followup_events() {
+        let grid = RowsAndCols {
+            rows: 46,
+            cols: 192,
+        };
+        let transient = RowsAndCols {
+            rows: 92,
+            cols: 384,
+        };
+        let guard = tmux_resize_guard(None, grid, true, true, false);
+        assert_eq!(guard, Some(grid));
+        assert_eq!(
+            tmux_resize_guard(guard, transient, true, false, false),
+            Some(grid)
+        );
+        assert_eq!(tmux_resize_guard(guard, transient, true, false, true), None);
+        assert_eq!(tmux_resize_guard(None, grid, false, true, false), None);
+    }
+
+    #[test]
+    fn restored_grid_survives_retina_to_low_dpi_and_back() {
+        let grid = RowsAndCols { rows: 24, cols: 80 };
+        let transient = RowsAndCols {
+            rows: 48,
+            cols: 160,
+        };
+        // Creation on Retina, move to a low-DPI screen, then a same-DPI
+        // size correction. The last event must also preserve the remote grid.
+        for dpi_changed in [false, true, false] {
+            assert_eq!(
+                preserved_cells(Some(grid), transient, dpi_changed, false, false),
+                Some(grid)
+            );
+        }
+        // After startup, both directions of a monitor DPI change preserve
+        // the grid even when the OS changes the pixel dimensions in stages.
+        assert_eq!(preserved_cells(None, grid, true, false, false), Some(grid));
+    }
+
+    #[test]
+    fn genuine_resize_after_restore_is_not_locked_to_old_grid() {
+        let grid = RowsAndCols { rows: 24, cols: 80 };
+        assert_eq!(preserved_cells(None, grid, false, false, false), None);
+        let resized = RowsAndCols {
+            rows: 30,
+            cols: 100,
+        };
+        assert_eq!(
+            preserved_cells(None, resized, true, false, false),
+            Some(resized)
+        );
+    }
+
+    #[test]
+    fn ordinary_window_scaling_behavior_is_unchanged() {
+        let grid = RowsAndCols { rows: 24, cols: 80 };
+        assert_eq!(preserved_cells(None, grid, false, false, false), None);
+        assert_eq!(preserved_cells(None, grid, false, true, false), Some(grid));
+        assert_eq!(preserved_cells(None, grid, false, false, true), Some(grid));
+    }
 }
 
 #[derive(Debug)]
@@ -23,10 +122,36 @@ impl super::TermWindow {
     pub fn resize(
         &mut self,
         dimensions: Dimensions,
-        window_state: WindowState,
+        mut window_state: WindowState,
         window: &Window,
         live_resizing: bool,
     ) {
+        let native_tmux = Mux::get()
+            .get_window(self.mux_window_id)
+            .map_or(false, |window| window.has_tmux_position_key());
+        let previous_guard = self.tmux_restore_cells;
+        self.tmux_restore_cells = tmux_resize_guard(
+            previous_guard,
+            self.current_cell_dimensions(),
+            native_tmux,
+            dimensions.dpi != self.dimensions.dpi,
+            live_resizing,
+        );
+        if previous_guard.is_none() && self.tmux_restore_cells.is_some() {
+            // Keep the grid through staged same-DPI geometry events too.
+            // Finish waits for queued native size requests to complete.
+            window.notify(super::TermWindowNotif::FinishTmuxWindowRestore);
+        }
+        if cfg!(target_os = "macos") && native_tmux && self.tmux_restore_cells.is_some() {
+            // AppKit may transiently report isZoomed during a screen change.
+            // Do not let that suppress the grid-preserving correction.
+            window_state -= WindowState::MAXIMIZED;
+        }
+        if live_resizing {
+            // A deliberate user resize takes precedence over startup restoration.
+            self.tmux_restore_cells = None;
+            self.tmux_restore_finishing = false;
+        }
         log::trace!(
             "resize event, live={} current cells: {:?}, current dims: {:?}, new dims: {:?} window_state:{:?}",
             live_resizing,
@@ -291,6 +416,7 @@ impl super::TermWindow {
         log::trace!("apply_dimensions computed size {:?}, dims {:?}", size, dims);
 
         self.terminal_size = size;
+        self.record_tmux_control_size();
 
         let mux = Mux::get();
         if let Some(window) = mux.get_window(self.mux_window_id) {
@@ -413,11 +539,20 @@ impl super::TermWindow {
             self.apply_scale_change(&dimensions, font_scale);
         }
 
-        let scale_changed_cells = if font_scale_changed || simple_dpi_change {
-            Some(cell_dims)
-        } else {
-            None
-        };
+        // Monitor changes can produce staged pixel-size notifications that
+        // fail the generic simple_dpi_change heuristic. A native tmux window
+        // must retain its grid rather than persist an intermediate grid remotely.
+        let native_tmux_dpi_change = dpi_changed
+            && Mux::get()
+                .get_window(self.mux_window_id)
+                .map_or(false, |window| window.has_tmux_position_key());
+        let scale_changed_cells = preserved_cells(
+            self.tmux_restore_cells,
+            cell_dims,
+            native_tmux_dpi_change,
+            font_scale_changed,
+            simple_dpi_change,
+        );
 
         log::trace!(
             "scaling_changed, follow with applying dimensions. scale_changed_cells={:?}",
