@@ -241,7 +241,11 @@ impl CommandDef {
             for dom in &domains {
                 let name = dom.domain_name();
                 // FIXME: use domain_label here, but needs to be async
-                let label = name;
+                let label = if dom.downcast_ref::<mux::tmux::TmuxDomain>().is_some() {
+                    format!("{name}, {}", dom.domain_id())
+                } else {
+                    name.to_string()
+                };
 
                 if dom.spawnable() {
                     if dom.state() == DomainState::Attached {
@@ -250,12 +254,25 @@ impl CommandDef {
                             doc: "".into(),
                             keys: vec![],
                             action: KeyAssignment::SpawnCommandInNewTab(SpawnCommand {
-                                domain: SpawnTabDomain::DomainName(name.to_string()),
+                                domain: SpawnTabDomain::DomainId(dom.domain_id()),
                                 ..SpawnCommand::default()
                             }),
                             menubar: &["Shell"],
                             icon: Some("md_tab_plus".into()),
                         });
+                        if dom.downcast_ref::<mux::tmux::TmuxDomain>().is_some() {
+                            result.push(ExpandedCommand {
+                                brief: format!("New Window (Domain {label})").into(),
+                                doc: "".into(),
+                                keys: vec![],
+                                action: KeyAssignment::SpawnCommandInNewWindow(SpawnCommand {
+                                    domain: SpawnTabDomain::DomainId(dom.domain_id()),
+                                    ..SpawnCommand::default()
+                                }),
+                                menubar: &["Shell"],
+                                icon: Some("cod_empty_window".into()),
+                            });
+                        }
                     } else {
                         result.push(ExpandedCommand {
                             brief: format!("Attach Domain {label}").into(),
@@ -266,6 +283,26 @@ impl CommandDef {
                             icon: Some("md_pipe".into()),
                         });
                     }
+                }
+            }
+            for id in mux.iter_windows() {
+                if let Some(window) = mux.get_window(id) {
+                    if window.get_workspace() != mux.active_workspace() || window.count_tabs() == 0
+                    {
+                        continue;
+                    }
+                    let title = window
+                        .get_active_tab()
+                        .map(|t| t.get_title())
+                        .unwrap_or_default();
+                    result.push(ExpandedCommand {
+                        brief: format!("Move Tab to Window {id}: {title}").into(),
+                        doc: "Move the current tab into this window".into(),
+                        keys: vec![],
+                        action: KeyAssignment::MoveTabToWindow(id),
+                        menubar: &["Window", "Move Tab to Window"],
+                        icon: None,
+                    });
                 }
             }
             for dom in &domains {
@@ -747,6 +784,18 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             args: &[],
             menubar: &["WezTerm"],
             icon: None,
+        },
+        MoveTabToNewWindow => CommandDef {
+            brief: "Move Tab to New Window".into(),
+            doc: "Move the current tab into a new window".into(),
+            keys: vec![], args: &[ArgType::ActiveTab],
+            menubar: &["Window"], icon: Some("md_open_in_new"),
+        },
+        MoveTabToWindow(id) => CommandDef {
+            brief: format!("Move Tab to Window {id}").into(),
+            doc: "Move the current tab into an existing window".into(),
+            keys: vec![], args: &[ArgType::ActiveTab],
+            menubar: &["Window", "Move Tab to Window"], icon: None,
         },
         SpawnWindow => CommandDef {
             brief: "New Window".into(),
@@ -2064,6 +2113,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ScrollToTop,
         ScrollToBottom,
         // ----------------- Window
+        MoveTabToNewWindow,
         ToggleFullScreen,
         ToggleAlwaysOnTop,
         ToggleAlwaysOnBottom,

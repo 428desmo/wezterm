@@ -1,130 +1,77 @@
-# tmux Desktop の起動・操作
+# 標準Launcherからtmux制御モードを使う
 
-このリポジトリの改修版には、保存したSSH接続先からtmux制御モードへ
-接続する専用設定 `assets/tmux-desktop/wezterm.lua` を用意しています。
-通常のWezTerm設定は書き換えません。
+接続先はWezTerm標準のLua設定 `launch_menu` に定義します。
+専用ランチャー、起動時の独自メニュー、接続先JSONの読み書きはありません。
+既存設定への追記例は `assets/tmux-launch-menu.lua` にあります。
+`USER@HOST`、セッション名、必要ならtmuxソケット名を置き換えてください。
+既存の `~/.wezterm.lua` がある場合は、設定を丸ごと上書きせず統合してください。
 
-## MacでGUIから起動
+```lua
+config.tmux_window_per_os_window = true
+config.scrollback_lines = 20000
+config.launch_menu = {
+  { label = 'Local shell', domain = { DomainName = 'local' } },
+  {
+    label = 'Development server (tmux: smoke)',
+    domain = { DomainName = 'local' },
+    args = { 'ssh', '-tt', 'USER@HOST',
+      "tmux -L 'wezterm-ext-test' -CC attach-session -t '=smoke'" },
+  },
+}
+```
 
-初回またはコード更新後に、リポジトリのルートで実行します。
+SSH認証は通常のSSH端末上で行います。接続先・セッションは明示的な設定であり、
+接続した履歴を自動登録するものではありません。旧試作の
+`~/.wezterm-tmux-connections.json` は読み書きせず、削除もしません。
+必要な項目を `launch_menu` に移してください。
+
+## 起動と接続
+
+標準のWezTermを起動すると通常のローカルターミナルが開きます。
+タブバーの「＋」を右クリックしてLauncherを開き、接続先を選択します。
+Enterは新しいタブ、Shift+Enterは新しいウィンドウとして起動します。
+この修飾操作は `launch_menu` の項目と接続済みDomainの起動項目に適用されます。
+ワークスペース切り替えなどの他のLauncher操作は変わりません。
+
+接続するとtmuxの各windowは独立したOSウィンドウとして開きます。
+SSH接続元は別に残ります。保存済み配置、倍率変更、終了処理はこれまで通りです。
+
+## 接続後の操作
+
+- **New Tab**（通常の＋クリック／Cmd+T）: 現在のtmux Domainでwindowを追加し、タブとして開きます。
+- **New Window (Domain tmux, ID)**: 標準コマンドパレットまたはShellメニューから、そのtmux接続にwindowを追加して独立表示します。IDで複数の接続を区別します。
+- **New Window**（Cmd+N）: 既存のアクションと同じく現在のpaneのDomainを使います。tmux paneなら同じセッションにwindowを作ります。ローカルシェルはLauncherのLocal shellを選びます。
+- **Move Tab to New Window / Move Tab to Window …**: Windowメニュー／コマンドパレットからタブ全体を移動します。
+- **Rename tab / Rename tmux window**: 設定例の `augment-command-palette` で標準パレットに追加します。公式の名前変更レシピと同じ `PromptInputLine` を使い、tmuxではサーバーのwindow名を変更します。
+- **Rename window**: 同じ標準パレット拡張でOSウィンドウのタイトルを変更します。空欄で自動タイトルに戻します。
+
+タブ名をドラッグして別のtmuxウィンドウ上で離すと統合します。
+見えているWezTermの表面以外（他アプリ上も含む）では新しいウィンドウに切り出します。
+ドラッグ中のEscは統合・切り出しをキャンセルします。
+
+追加は既存tmuxセッション内へのwindow作成です。別セッションをリンクする操作ではありません。
+現在の標準起動操作でのtmux window作成は、コマンド・cwd・環境変数の上書きには対応していません。
+
+## 開発版をGUIから起動
+
+Macでは通常のアプリ名・設定探索を使う開発版を作れます。
 
 ```sh
 cargo build -p wezterm-gui -p wezterm
-python3 ci/build-tmux-desktop-app.py
+python3 ci/build-debug-app.py
 ```
 
-Apple Siliconの開発環境でC++ヘッダーが見つからない場合は、これまでと同じ
-SDKの `CXXFLAGS` を付けてビルドしてください。
+`target/WezTerm.app` をFinderから起動します。専用設定を強制するラッパーはありません。
+通常の設定ファイルを使います。実行ファイル更新後は再パッケージしてください。
+旧 `target/WezTerm Tmux.app` は古い試作のコピーなので使わないでください。
 
-生成された `target/WezTerm Tmux.app` をFinderでダブルクリックしてください。
-Dockへの登録や、アプリ一式をApplicationsへコピーしての使用も可能です。
-アプリ内に実行ファイルと設定をコピーするため、更新時は再パッケージが必要です。
-この開発用アプリは署名・公証して配布するものではありません。
-
-## 接続先の登録と選択
-
-起動すると保存済みの接続先リストが開きます。初回は「接続先を登録」を選び、
-表示名、SSH先（`USER@HOST` またはSSH設定の別名）、既存tmuxセッション名、
-必要なら `tmux -L` のソケット名を入力します。同じ表示名で登録すると更新します。
-登録後はリストに戻るので、項目を選択すると接続します。
-
-例: 表示名 `VPS 開発`、SSH先 `USER@HOST`、セッション名 `smoke`、
-ソケット名 `wezterm-ext-test`。標準のtmuxサーバーの場合、ソケット名は空欄です。
-リストは登録した接続先であり、リモートの全セッションの自動検索ではありません。
-既存の別セッションに接続したい場合も、別の接続先として登録できます。
-
-SSHは独立した接続元ウィンドウで実行されます。パスワード、鍵のパスフレーズ、
-初回のホスト鍵確認は、そのウィンドウで応答してください。秘密情報は登録しません。
-SSHの設定・鍵・agentは通常どおり利用します。
-
-接続先は `~/.wezterm-tmux-connections.json` に保存します。
-必要な場合は `WEZTERM_TMUX_CONNECTIONS_FILE` で保存先を変更できます。
-Windowsもユーザーのホームディレクトリ内です。保存ファイルが不正な場合は、
-エラーを表示して接続を中止し、上書きしません。複数プロセスで同時に接続先を
-編集しないでください。
-
-## 操作メニュー
-
-各ウィンドウのタブバーにある **＋** をクリックするとメニューを開けます。
-Macは `Cmd+Shift+M`、Windows/Linuxは `Ctrl+Shift+M` でも開けます。
-コマンドパレットにも `tmux:` の操作が追加されます。
-
-- **保存した接続先へアタッチ**: アプリ起動後の追加接続にも使えます。
-- **tmux window追加 → 独立ウィンドウ**: 接続中のセッションにwindowを作成し、
-  独立したOSウィンドウで開きます。
-- **tmux window追加 → タブ**: 同じセッションにwindowを作成し、選択中の
-  tmuxウィンドウにタブとして追加します。ローカルシェルのタブではありません。
-- **このタブを統合 → 名前 (window ID)**: 移動先を最初のメニューに直接表示します。
-  選択するとそのウィンドウへタブを移します。接続元・通常のローカルウィンドウは
-  統合先リストから除外します。
-- **このタブを独立ウィンドウに切り出す**: タブ全体を新しいOSウィンドウへ移します。
-- **tmux window / タブの名前を変更**: tmux側のwindow名を変更します。
-  空白・引用符・日本語も使え、再接続後もtmuxに名前が残ります。
-- **OSウィンドウのタイトルを変更**: ローカルのウィンドウタイトルを変更します。
-  空欄で自動タイトルに戻します。
-- **保存した接続先を削除**: リストから削除します。実行中の接続は切断しません。
-
-接続元からtmux windowの操作を選んだ場合は、対象のtmuxタブを選ぶリストが開きます。
-複数の接続先が開いている場合も、そのタブが所属するtmux制御接続へ命令を送ります。
-
-### タブのドラッグによる統合・切り出し
-
-タブバーの **タブ名** を左ボタンでつかみ、別のtmuxウィンドウの上で離すと、
-そのウィンドウのタブに統合します。OSのタイトルバーをつかむと通常のウィンドウ移動です。
-短いマウス移動はクリックとして扱い、一定以上動かした時だけドラッグになります。
-ドラッグ中にEscを押すとキャンセルし、その後ボタンを離しても統合・切り出しは行いません。
-移動可能なウィンドウ上ではつかむ形、移動対象外では禁止のカーソルになります。
-ドロップ後は移動先のタブを選択し、そのウィンドウへ入力フォーカスを移します。
-接続元・ローカルシェルなど、統合対象外のWezTermウィンドウの表面ではタブを移動しません。
-手前に見えているWezTermウィンドウの表面以外へタブをドロップすると、その位置に新しいOSウィンドウを作ります。他アプリの上や、他アプリに隠されたWezTermウィンドウの領域も切り出し先になります。ドロップ先のディスプレイの倍率で初期サイズを計算します。メニューの「このタブを独立ウィンドウに切り出す」も利用できます。
-
-Mac/Windows用の処理を用意しています。Macでは両倍率の画面でネイティブの
-ドロップ先判定と移動処理を確認していますが、実際のマウス操作は手動確認が必要です。
-Windowsビルド・GUI操作は未確認です。Linuxでのウィンドウ間ドラッグは今回未実装です。
-
-ここでの「追加」は現在のtmuxセッション内へのwindow追加です。
-別セッションを既存のtmuxセッションにリンクする `link-window` 操作ではありません。
-統合・切り出しではタブIDとpane IDを保ち、サーバー上のシェルを作り直しません。
-タブを統合すると、同じOSウィンドウにあるタブはそのウィンドウのサイズに従います。
-まず1 window / 1 paneの構成で利用してください。
-
-タブのグループ構成、およびローカルで変更したOSウィンドウタイトルの再起動後の
-復元は今回の対象外です。再接続時は従来どおり各tmux windowを独立して開きます。
-既存のディスプレイ位置保存・接続元の行列サイズ保存は引き続き利用します。
-
-## Windows 11
-
-MacでWindowsクロスコンパイル環境は追加していません。
-既存のWindows向けビルド手順（`docs/install/source.md` の Building on Windows、
-`.github/workflows/gen_windows.yml`）に従って
-Windows側で `wezterm-gui.exe` と `wezterm.exe` をビルドしてください。
-その後、PowerShellで次を実行すると、リポジトリの `target` 内に起動ショートカットを作ります。
-
-```powershell
-powershell -File ci/create-tmux-desktop-shortcut.ps1
-```
-
-`target/WezTerm Tmux.lnk` をダブルクリックして起動できます。
-WindowsのOpenSSHクライアントが利用可能である必要があります。
-ソースと実行ファイルを移動した場合はショートカットを作り直してください。
-Windows向けビルドとGUI実行は今回未確認です。
+Windowsはリポジトリ既存のビルド手順／CIでビルドした `wezterm-gui.exe` を使い、
+同じLua設定を適用します。Mac上でWindows用のクロスコンパイル環境は作りません。
+WindowsビルドとGUI実行は未確認です。
 
 ## 検証
 
-Mac上で実施:
-
-```sh
-cargo test -p wezterm-escape-parser --features tmux_cc,std
-cargo test -p mux
-python3 ci/test-tmux-desktop-config.py
-python3 ci/test-tmux-desktop.py
-```
-
-最後のテストはGUIを開き、使い捨てのローカルtmuxサーバーで実行します。
-新規window・タブ追加、統合・切り出し、ID維持、名前変更、各paneへの入力を検証し、
-終了後にテスト用tmuxサーバーを破棄します。実サーバーへは接続しません。
-接続先リストのテストはGUIコールバックを模擬し、一時ファイルだけを使用します。
-登録・更新・選択・キャンセル・削除・引数の引用・Windows式の保存更新を検証します。
-専用アプリはFinderと同じLaunchServices経由の起動、接続先ファイルの読み込みを
-Macで確認しています。
-マウスで全メニューを選択する操作と、実SSHでの認証・接続は手動で確認してください。
+`ci/test-tmux-desktop.py` は使い捨てのローカルtmuxセッションで、標準の
+SpawnTab / SpawnCommandInNewWindowアクションからの追加、タブ移動、ID維持、
+名前変更と各paneへの入力を確認します。実サーバーには接続しません。
+Launcherのマウス／キー操作と名前変更ダイアログは手動確認が必要です。

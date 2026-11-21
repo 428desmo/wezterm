@@ -60,36 +60,6 @@ fn main() -> anyhow::Result<()> {
                     "Native hit test missed the shown window on {}",
                     screen.id
                 );
-                anyhow::ensure!(
-                    !Connection::get()
-                        .unwrap()
-                        .is_desktop_at_screen_point(hit_point),
-                    "A terminal window was classified as empty desktop"
-                );
-                let mut desktop_points = 0;
-                for x in 1..10 {
-                    for y in 1..10 {
-                        let point = screen.rect.origin
-                            + euclid::vec2(
-                                screen.rect.width() * x / 10,
-                                screen.rect.height() * y / 10,
-                            );
-                        if Connection::get().unwrap().is_desktop_at_screen_point(point) {
-                            desktop_points += 1;
-                            anyhow::ensure!(
-                                Connection::get()
-                                    .unwrap()
-                                    .window_at_screen_point(point)
-                                    .is_none(),
-                                "Desktop classification overlaps a terminal"
-                            );
-                        }
-                    }
-                }
-                println!(
-                    "Exposed desktop sample points on {}: {}",
-                    screen.id, desktop_points
-                );
                 let overlap = Window::new_window(
                     "placement-smoke",
                     "placement-smoke-overlap",

@@ -474,25 +474,6 @@ fn set_window_position(window: *mut Object, coords: ScreenPoint) {
 }
 
 impl Window {
-    pub(crate) fn is_desktop_at_screen_point(point: ScreenPoint) -> bool {
-        use core_graphics::window::*;
-        // Exclude Finder's desktop elements, but keep ordinary Finder windows,
-        // the Dock and other applications as blocked drop destinations.
-        unsafe {
-            let number: NSInteger = msg_send![class!(NSWindow),
-                windowNumberAtPoint: screen_point_to_cartesian(point)
-                belowWindowWithWindowNumber: 0 as NSInteger];
-            if number == 0 {
-                return true;
-            }
-            copy_window_info(
-                kCGWindowListOptionIncludingWindow | kCGWindowListExcludeDesktopElements,
-                number as CGWindowID,
-            )
-            .map_or(false, |windows| windows.len() == 0)
-        }
-    }
-
     pub(crate) fn at_screen_point(point: ScreenPoint) -> Option<Self> {
         let connection = Connection::get()?;
         unsafe {

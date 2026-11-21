@@ -21,8 +21,8 @@ on reattachment. Pixel dimensions are recalculated for the destination DPI.
 Input, output, history capture and resizing use the existing tmux
 implementation. Initially test with one pane per tmux window. Runtime window
 creation is covered by the local Mac GUI smoke test; split layouts remain
-unvalidated. The optional [tmux Desktop profile](../../../tmux-desktop.md)
-adds saved SSH connections and GUI actions for creating, grouping and separating
+unvalidated. The [standard Launcher integration guide](../../../tmux-desktop.md)
+describes SSH connections in `launch_menu` and standard GUI actions for creating, grouping and separating
 tmux tabs and changing titles.
 
 On macOS and Windows, native window moves are saved locally in

@@ -469,6 +469,10 @@ impl Domain for TmuxDomain {
         "tmux"
     }
 
+    async fn domain_label(&self) -> String {
+        format!("tmux connection {}", self.inner.domain_id)
+    }
+
     async fn attach(&self, _window_id: Option<crate::WindowId>) -> anyhow::Result<()> {
         Ok(())
     }

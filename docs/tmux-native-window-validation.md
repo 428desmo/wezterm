@@ -571,3 +571,75 @@ Escape interaction remain manual checks: drag onto another app to tear off,
 onto a remote tmux window to merge, and press Escape before releasing for each.
 Verify no window or tab changes on cancellation, then verify a new drag works.
 Windows build and GUI execution remain unverified.
+
+
+### Replace the desktop prototype with standard UI integration
+
+The dedicated tmux-desktop Lua startup/menu hooks, JSON connection manager,
+private app packager, Windows shortcut and associated mocked-UI test were
+removed. The existing Launcher reads normal `launch_menu` entries; Shift+Enter
+converts launch-menu/domain spawning into the existing NewWindow action.
+The normal app/config identity is used by `ci/build-debug-app.py`.
+`assets/tmux-launch-menu.lua` is an example, not an automatically loaded profile.
+Existing user settings and the previous JSON file are left untouched.
+
+Standard GUI SpawnTab/SpawnCommandInNewWindow now queue tmux window creation
+without relying on Domain::spawn's placeholder error. tmux domains use stable
+IDs in menu actions so multiple connections named tmux are not confused.
+New built-in Window actions expose whole-tab movement and title prompts;
+the latter reuse the existing PromptInputLine editor. No Lua menu replacement
+is required. Command/cwd/environment overrides for new tmux windows are rejected
+explicitly until supported.
+
+Mac GUI/CLI build and example-config loading passed. The disposable local tmux
+test now exercises standard spawn and move actions, checks stable identities,
+server rename and independent pane input. Its readiness gate avoids reentrant
+status events while native windows are still being created. Physical Launcher
+selection/Shift+Enter, rename dialogs and the standard macOS menu remain manual
+checks. Windows build and GUI execution remain unperformed: build using the
+existing Windows workflow, use the same launch_menu configuration, and repeat
+connection, new-tab/new-window, title and drag/cancel checks.
+
+
+### Upstream conventions follow-up
+
+Upstream tracking issue #336 describes tmux control mode as a multiplexer domain
+rendered with native windows/tabs/panes. This supports reusing those abstractions,
+but is not approval of this branch's UI or platform placement policy. The official
+augment-command-palette documentation includes a Rename Tab recipe using
+PromptInputLine and tab:set_title. The newly added RenameTab/RenameWindow actions
+and prompt-editor refactor were removed in favor of that extension point.
+The example builds palette entries synchronously and retains the original rename
+target even if the active tab changes before the prompt completes.
+
+Code inspection corrected the previous New Window explanation: SpawnCommand
+derives Default and SpawnTabDomain defaults to CurrentPaneDomain. Cmd+N keeps
+that routing; the local-shell and SSH-launch entries now explicitly select
+DomainName=local. The GUI regression exercises Cmd+N from tmux and local launch
+from the same tmux window, checking that the latter does not create a remote
+window. Palette tests cover cancellation, original-target identity and local/
+tmux title handling. Both tests passed on Mac.
+
+The unused empty-desktop classification API was removed: the current gesture
+only needs frontmost WezTerm hit testing. Dynamic move destinations exclude
+inactive workspaces and empty windows. Shift+Enter, whole-tab move actions,
+native drag and placement remain independent additions requiring separate
+upstream review. Acceptance has not been established. Windows build/GUI remains
+unverified; normal Launcher selection and physical mouse interaction remain
+manual checks.
+
+References: https://github.com/wezterm/wezterm/issues/336,
+https://wezterm.org/config/lua/window-events/augment-command-palette.html,
+https://github.com/wezterm/wezterm/issues/7057.
+
+
+Native diagnostic caveat for this run: placement-smoke failed at its first
+frontmost-hit assertion on the 2x display. Temporary diagnostics showed the
+created test window visible and on the active Space, with the sampled point
+inside its frame, but AppKit returned a different frontmost window number.
+Explicit focus/activation and an elevated test-window level did not make that
+assertion pass. These temporary diagnostics and test-level changes were removed.
+This run therefore does not establish native hit-test or DPI-test success;
+physical drag and screen-placement confirmation remains outstanding. The
+successful standard-action/palette tests do not cover that assertion. No Windows
+execution or upstream acceptance is claimed.

@@ -24,18 +24,26 @@ local function remote_tabs()
 end
 w.on('update-status',function()
  local stage=w.GLOBAL.desktop_test_stage or 0
- if stage>=3 then return end
+ if stage>=6 then return end
  local original={}
  for _,id in ipairs(w.GLOBAL.desktop_test_tabs or {}) do table.insert(original,w.mux.get_tab(id)) end
  local tabs=remote_tabs()
  if stage==0 and #tabs==3 then
-  w.GLOBAL.desktop_test_stage=1;original=tabs
+  -- gui_window() yields: guard against status events from other windows.
+  if w.GLOBAL.desktop_test_checking then return end
+  w.GLOBAL.desktop_test_checking=true
+  for _,t in ipairs(tabs) do
+   local ready,gui=pcall(function()return t:window():gui_window()end)
+   if not ready or not gui then w.GLOBAL.desktop_test_checking=false;return end
+  end
+  w.GLOBAL.desktop_test_stage=1
+  w.GLOBAL.desktop_test_checking=false;original=tabs
   local ids={};for _,t in ipairs(original) do table.insert(ids,t:tab_id()) end;w.GLOBAL.desktop_test_tabs=ids
   original[1]:rename_tmux_window("work 'quoted'; $HOME 日本語")
-  original[1]:spawn_tmux_window(true)
+  original[1]:window():gui_window():perform_action(w.action.SpawnTab 'CurrentPaneDomain',original[1]:active_pane())
  elseif stage==1 and #tabs==4 then
   assert(tabs[4]:window():window_id()==original[1]:window():window_id(),'new tab created in wrong window')
-  w.GLOBAL.desktop_test_stage=2;original[1]:spawn_tmux_window(false)
+  w.GLOBAL.desktop_test_stage=2;original[1]:window():gui_window():perform_action(w.action.SpawnWindow,original[1]:active_pane())
  elseif stage==2 and #tabs==5 then
   w.GLOBAL.desktop_test_stage=3;w.log_info('desktop-test: merge')
   assert(tabs[5]:window():window_id()~=original[1]:window():window_id(),'new OS window not separate')
@@ -50,6 +58,31 @@ w.on('update-status',function()
   w.log_info('desktop-test: separated')
   assert(separated:window_id()~=target and original[3]:window():window_id()==separated:window_id(),'separate failed')
   assert(original[3]:tab_id()==id and original[3]:active_pane():pane_id()==pane_id,'identity changed on separation')
+  w.GLOBAL.desktop_test_stage=3
+  original[2]:window():gui_window():perform_action(w.action.MoveTabToWindow(target),original[2]:active_pane())
+ elseif stage==3 then
+  local target=original[1]:window():window_id()
+  if original[2]:window():window_id()~=target then return end
+  w.GLOBAL.desktop_test_stage=4
+  original[2]:window():gui_window():perform_action(w.action.MoveTabToNewWindow,original[2]:active_pane())
+ elseif stage==4 then
+  if original[2]:window():window_id()==original[1]:window():window_id() then return end
+  w.GLOBAL.desktop_test_stage=5
+  original[1]:window():gui_window():perform_action(w.action.SpawnCommandInNewWindow {
+   domain={DomainName='local'},args={'/bin/sh','-c',"printf 'LOCAL_LAUNCH_MARKER\\n'; exec /bin/sh"},
+  },original[1]:active_pane())
+ elseif stage==5 then
+  local found=false
+  for _,win in ipairs(w.mux.all_windows()) do
+   for _,t in ipairs(win:tabs()) do
+    local p=t:active_pane()
+    if p and p:get_domain_name()=='local' and p:get_lines_as_text():find('LOCAL_LAUNCH_MARKER',1,true) then found=true end
+   end
+  end
+  if not found then return end
+  assert(#tabs==5,'Local launcher item created a tmux window')
+  w.GLOBAL.desktop_test_stage=6
+  local id=original[3]:tab_id();local pane_id=original[3]:active_pane():pane_id()
   original[1]:window():set_title('Custom OS window')
   assert(original[1]:window():get_title()=='Custom OS window','window title not changed')
   for i,t in ipairs(original) do t:active_pane():send_text("printf 'DESKTOP_MARKER_"..i.."\\n'\n") end

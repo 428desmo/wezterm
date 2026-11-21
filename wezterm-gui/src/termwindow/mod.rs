@@ -2607,7 +2607,7 @@ impl TermWindow {
         let title = args.title.unwrap();
         let flags = args.flags;
         let help_text = args.help_text.unwrap_or(
-            "Select an item and press Enter=launch  \
+            "Select an item and press Enter=launch, Shift+Enter=new window  \
              Esc=cancel  /=filter"
                 .to_string(),
         );
@@ -2822,6 +2822,15 @@ impl TermWindow {
             }
             SpawnTab(spawn_where) => {
                 self.spawn_tab(spawn_where);
+            }
+            MoveTabToNewWindow | MoveTabToWindow(_) => {
+                let target = match assignment {
+                    MoveTabToWindow(id) => Some(*id),
+                    _ => None,
+                };
+                if let Some(tab) = Mux::get().get_active_tab_for_window(self.mux_window_id) {
+                    Mux::get().move_tab_to_window(tab.tab_id(), target)?;
+                }
             }
             SpawnWindow => {
                 self.spawn_command(&SpawnCommand::default(), SpawnWhere::NewWindow);

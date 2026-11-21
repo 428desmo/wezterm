@@ -250,7 +250,7 @@ impl LauncherState {
                 Entry {
                     label: format!("New Tab ({})", domain.label),
                     action: KeyAssignment::SpawnCommandInNewTab(SpawnCommand {
-                        domain: SpawnTabDomain::DomainName(domain.name.to_string()),
+                        domain: SpawnTabDomain::DomainId(domain.domain_id),
                         ..SpawnCommand::default()
                     }),
                 }
@@ -475,8 +475,17 @@ impl LauncherState {
     }
 
     fn launch(&self, active_idx: usize) -> bool {
+        self.launch_in_window(active_idx, false)
+    }
+
+    fn launch_in_window(&self, active_idx: usize, new_window: bool) -> bool {
         if let Some(entry) = self.filtered_entries.get(active_idx) {
-            let assignment = entry.action.clone();
+            let assignment = match (&entry.action, new_window) {
+                (KeyAssignment::SpawnCommandInNewTab(command), true) => {
+                    KeyAssignment::SpawnCommandInNewWindow(command.clone())
+                }
+                _ => entry.action.clone(),
+            };
             self.window.notify(TermWindowNotif::PerformAssignment {
                 pane_id: self.pane_id,
                 assignment,
@@ -629,9 +638,10 @@ impl LauncherState {
                 }
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Enter,
-                    ..
+                    modifiers,
                 }) => {
-                    if self.launch(self.active_idx) {
+                    if self.launch_in_window(self.active_idx, modifiers.contains(Modifiers::SHIFT))
+                    {
                         break;
                     }
                 }

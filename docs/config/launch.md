@@ -204,3 +204,10 @@ return {
   launch_menu = launch_menu,
 }
 ```
+
+
+### Opening a launcher item in a new window
+
+Press Enter to open a launch-menu item or attached domain in a new tab.
+Press Shift+Enter to open it in a new window instead. Other launcher actions,
+such as switching tabs or workspaces, keep their normal behavior.

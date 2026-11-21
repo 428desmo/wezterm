@@ -57,6 +57,25 @@ pub async fn spawn_command_internal(
         None => None,
     };
 
+    // Control-mode creation completes through tmux notifications, rather than
+    // synchronously returning a new pane from Domain::spawn.
+    let domain = mux.resolve_spawn_tab_domain(current_pane_id, &spawn.domain)?;
+    if let Some(tmux) = domain.downcast_ref::<mux::tmux::TmuxDomain>() {
+        if matches!(spawn_where, SpawnWhere::NewTab | SpawnWhere::NewWindow) {
+            anyhow::ensure!(
+                spawn.args.is_none()
+                    && spawn.cwd.is_none()
+                    && spawn.set_environment_variables.is_empty(),
+                "tmux window creation does not yet support command, cwd or environment overrides"
+            );
+            tmux.create_window(match spawn_where {
+                SpawnWhere::NewTab => src_window_id,
+                _ => None,
+            })?;
+            return Ok(());
+        }
+    }
+
     let cwd = if let Some(cwd) = spawn.cwd.as_ref() {
         Some(cwd.to_str().map(|s| s.to_owned()).ok_or_else(|| {
             anyhow!(

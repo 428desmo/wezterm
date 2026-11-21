@@ -537,6 +537,8 @@ fn default_message() -> String {
 pub enum KeyAssignment {
     SpawnTab(SpawnTabDomain),
     SpawnWindow,
+    MoveTabToNewWindow,
+    MoveTabToWindow(usize),
     ToggleFullScreen,
     ToggleAlwaysOnTop,
     ToggleAlwaysOnBottom,

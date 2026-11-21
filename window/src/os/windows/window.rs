@@ -411,20 +411,6 @@ fn get_primary_monitor_dpi() -> u32 {
 }
 
 impl Window {
-    pub(crate) fn is_desktop_at_screen_point(point: crate::ScreenPoint) -> bool {
-        unsafe {
-            let hit = WindowFromPoint(POINT {
-                x: point.x as i32,
-                y: point.y as i32,
-            });
-            let root = GetAncestor(hit, GA_ROOT);
-            let mut name = [0u16; 256];
-            let len = GetClassNameW(root, name.as_mut_ptr(), name.len() as i32);
-            let name = String::from_utf16_lossy(&name[..len.max(0) as usize]);
-            root == GetDesktopWindow() || name == "Progman" || name == "WorkerW"
-        }
-    }
-
     pub(crate) fn at_screen_point(point: crate::ScreenPoint) -> Option<Self> {
         let connection = Connection::get()?;
         let hwnd = unsafe {
