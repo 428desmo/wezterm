@@ -3,8 +3,8 @@ use crate::termwindow::{
     GuiWin, MouseCapture, PositionedSplit, ScrollHit, TermWindowNotif, UIItem, UIItemType, TMB,
 };
 use ::window::{
-    CursorIcon, MouseButtons as WMB, MouseEvent, MouseEventKind as WMEK, MousePress,
-    WindowDecorations, WindowOps, WindowState,
+    Connection, ConnectionOps, CursorIcon, MouseButtons as WMB, MouseEvent, MouseEventKind as WMEK,
+    MousePress, WindowDecorations, WindowOps, WindowState,
 };
 use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
 use config::MouseEventAltScreen;
@@ -22,6 +22,43 @@ use termwiz::surface::Line;
 use wezterm_dynamic::ToDynamic;
 use wezterm_term::input::{MouseButton, MouseEventKind as TMEK};
 use wezterm_term::{ClickPosition, LastMouseClick, StableRowIndex};
+
+fn is_tmux_tab(tab: &mux::tab::Tab) -> bool {
+    let panes = tab.iter_panes_ignoring_zoom();
+    !panes.is_empty()
+        && panes.iter().all(|p| {
+            Mux::get()
+                .get_domain(p.pane.domain_id())
+                .map_or(false, |domain| {
+                    domain.downcast_ref::<mux::tmux::TmuxDomain>().is_some()
+                })
+        })
+}
+
+fn tmux_tab_drop_target(
+    source: mux::window::WindowId,
+    point: window::ScreenPoint,
+) -> Option<Option<mux::window::WindowId>> {
+    let connection = Connection::get()?;
+    let screens = connection.placement_screens().ok()?;
+    if !screens.iter().any(|screen| screen.rect.contains(point)) {
+        return None;
+    }
+    // Only the visible surface of one of our native windows blocks tear-off.
+    // A foreign window in front of a terminal is a valid new-window target.
+    let native = match connection.window_at_screen_point(point) {
+        Some(native) => native,
+        None if cfg!(any(target_os = "macos", target_os = "windows")) => return Some(None),
+        None => return None,
+    };
+    let target = crate::frontend::front_end().mux_window_for_native_window(&native)?;
+    let mux = Mux::get();
+    let eligible = target != source
+        && mux.get_window(target).map_or(false, |window| {
+            window.count_tabs() > 0 && window.iter_tabs().all(|tab| is_tmux_tab(tab))
+        });
+    eligible.then_some(Some(target))
+}
 
 impl super::TermWindow {
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
@@ -125,6 +162,40 @@ impl super::TermWindow {
             WMEK::Release(ref press) => {
                 self.current_mouse_capture = None;
                 self.current_mouse_buttons.retain(|p| p != press);
+                if press == &MousePress::Left {
+                    if self.tab_drag_cancelled {
+                        self.tab_drag_cancelled = false;
+                        self.tab_drag = None;
+                        return;
+                    }
+                    if let Some((tab, _, moved)) = self.tab_drag.take() {
+                        if moved {
+                            context.set_cursor(Some(CursorIcon::Default));
+                            if let Some(target) =
+                                tmux_tab_drop_target(self.mux_window_id, event.screen_coords)
+                            {
+                                let point = event.screen_coords;
+                                let position = config::GuiPosition {
+                                    x: config::Dimension::Pixels(point.x as f32),
+                                    y: config::Dimension::Pixels(point.y as f32),
+                                    origin: config::GeometryOrigin::ScreenCoordinateSystem,
+                                };
+                                match Mux::get().move_tab_to_window_at(tab, target, Some(position))
+                                {
+                                    Ok(target) => {
+                                        if let Some(destination) = crate::frontend::front_end()
+                                            .gui_window_for_mux_window(target)
+                                        {
+                                            destination.window.focus();
+                                        }
+                                    }
+                                    Err(err) => log::error!("Tab drop failed: {err:#}"),
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
                 if press == &MousePress::Left && self.window_drag_position.take().is_some() {
                     // Completed a window drag
                     return;
@@ -158,6 +229,23 @@ impl super::TermWindow {
             }
 
             WMEK::Move => {
+                if self.tab_drag_cancelled {
+                    return;
+                }
+                if let Some((_, start, moved)) = self.tab_drag.as_mut() {
+                    *moved |= (start.screen_coords.x - event.screen_coords.x).abs() >= 10
+                        || (start.screen_coords.y - event.screen_coords.y).abs() >= 10;
+                    if *moved {
+                        let allowed =
+                            tmux_tab_drop_target(self.mux_window_id, event.screen_coords).is_some();
+                        context.set_cursor(Some(if allowed {
+                            CursorIcon::Grabbing
+                        } else {
+                            CursorIcon::NoDrop
+                        }));
+                        return;
+                    }
+                }
                 if let Some(start) = self.window_drag_position.as_ref() {
                     // Dragging the window
                     // Compute the distance since the initial event
@@ -463,6 +551,15 @@ impl super::TermWindow {
             WMEK::Press(MousePress::Left) => match item {
                 TabBarItem::Tab { tab_idx, .. } => {
                     self.activate_tab(tab_idx as isize).ok();
+                    if self.config.tmux_window_per_os_window {
+                        let tab = Mux::get()
+                            .get_window(self.mux_window_id)
+                            .and_then(|window| window.get_tab_at_idx(tab_idx).cloned());
+                        if let Some(tab) = tab.filter(|tab| is_tmux_tab(tab)) {
+                            self.tab_drag_cancelled = false;
+                            self.tab_drag = Some((tab.tab_id(), event.clone(), false));
+                        }
+                    }
                 }
                 TabBarItem::NewTabButton { .. } => {
                     self.do_new_tab_button_click(MousePress::Left);

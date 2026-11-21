@@ -428,6 +428,16 @@ impl super::TermWindow {
     }
 
     pub fn raw_key_event_impl(&mut self, key: RawKeyEvent, context: &dyn WindowOps) {
+        if self.tab_drag.is_some()
+            && (key.key == KeyCode::Char('\u{1b}')
+                || key.phys_code == Some(::window::PhysKeyCode::Escape))
+        {
+            self.tab_drag_cancelled = true;
+            context.set_cursor(Some(::window::CursorIcon::Default));
+            key.set_handled();
+            return;
+        }
+
         // The leader key is a kind of modal modifier key.
         // It is allowed to be active for up to the leader timeout duration,
         // after which it auto-deactivates.
@@ -597,6 +607,12 @@ impl super::TermWindow {
     }
 
     pub fn key_event_impl(&mut self, window_key: KeyEvent, context: &dyn WindowOps) {
+        if self.tab_drag.is_some() && window_key.key == KeyCode::Char('\u{1b}') {
+            self.tab_drag_cancelled = true;
+            context.set_cursor(Some(::window::CursorIcon::Default));
+            return;
+        }
+
         let pane = match self.get_active_pane_or_overlay() {
             Some(pane) => pane,
             None => return,

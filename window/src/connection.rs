@@ -27,6 +27,16 @@ pub enum ApplicationEvent {
 }
 
 pub trait ConnectionOps {
+    /// True only for exposed desktop; unsupported backends reject tear-off.
+    fn is_desktop_at_screen_point(&self, _point: crate::ScreenPoint) -> bool {
+        false
+    }
+
+    /// Frontmost window owned by this connection at a desktop point.
+    fn window_at_screen_point(&self, _point: crate::ScreenPoint) -> Option<crate::Window> {
+        None
+    }
+
     fn placement_screens(&self) -> anyhow::Result<Vec<crate::screen::PlacementScreen>> {
         Ok(self
             .screens()?

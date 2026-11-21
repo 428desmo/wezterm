@@ -513,6 +513,10 @@ impl GuiFrontEnd {
         *self.switching_workspaces.borrow()
     }
 
+    pub fn mux_window_for_native_window(&self, window: &Window) -> Option<MuxWindowId> {
+        self.known_windows.borrow().get(window).copied()
+    }
+
     pub fn gui_window_for_mux_window(&self, mux_window_id: MuxWindowId) -> Option<GuiWin> {
         let windows = self.known_windows.borrow();
         for (window, v) in windows.iter() {

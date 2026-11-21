@@ -473,3 +473,101 @@ Validation on Mac:
   status 0, logged no control parse error and left all three tmux windows alive.
   An actual Cmd-Q/Yes interaction over the user's SSH connection remains for
   user verification; neither that SSH host nor the production server was used.
+
+## Follow-up: GUI connection profiles and tab management
+
+The optional `assets/tmux-desktop/wezterm.lua` profile provides saved SSH/tmux
+connections, a startup selector and a `+` menu. The Mac app packager and Windows
+shortcut script isolate it from existing user configuration. See
+[the tmux Desktop guide](tmux-desktop.md) for usage and remaining limitations.
+
+The mux Lua tab API now exposes `spawn_tmux_window(as_tab)`,
+`move_to_window(optional_window_id)` and `rename_tmux_window(name)`.
+New-window commands return their tmux ID and associate an optional destination
+before the existing WindowAdd/list/sync path attaches the new tab. Whole-tab
+reparenting preserves the tab/pane IDs and the tmux mapping. Renaming is sent
+through the existing control connection; normal mux title handling updates the
+GUI. The window list now places free-form names after fixed metadata, avoiding
+space-delimited field corruption from a user-chosen title.
+
+Japanese rename testing also exposed UTF-8 continuation byte 0x9c being mistaken
+for raw C1 ST by the shutdown parser. The control parser now distinguishes that
+continuation byte, and switches to control parsing immediately upon DCS entry
+within a read. The regression checks Japanese titles at every read split,
+while all previous notification-free shutdown tests remain in place.
+
+Validation on Mac: GUI and CLI builds passed, all 61 escape-parser and 10 mux
+tests passed, connection-list callback tests passed (including a simulated
+Windows rename/replace path), and the disposable local GUI integration test
+passed creation as a new OS window and as a tab, merge/separation with stable
+IDs, server-side names containing spaces/quotes/Unicode and separate input
+markers in the expected server windows. The packaged app was opened through
+macOS LaunchServices with a temporary profile file and no SSH connection;
+startup completed without Lua errors. Windows build and GUI execution are
+still unverified. No production server was contacted. Grouping and local OS
+window titles are not persisted across application restart in this change.
+
+
+## Follow-up: direct merge targets and dragging a tmux tab
+
+The user reported that choosing the merge option appeared to do nothing.
+The main desktop menu now lists each eligible merge destination directly as
+`このタブを統合 → ...` instead of requiring a second selector from a remote tab.
+The callback resolves tab/window IDs again at activation time. A Lua callback
+regression verifies the destination list excludes the source and control
+window, and that selection moves the expected tab to the expected window.
+
+Opt-in tmux tabs can now be dragged with the left mouse button to another
+remote-only tmux window. The gesture preserves normal short clicks, indicates
+eligible/ineligible targets, reuses whole-tab movement on release and focuses
+the destination. A connection-level hit-test hook has Mac and Windows backends;
+AppKit's public windowNumberAtPoint API respects z-order and other apps, while
+Windows uses WindowFromPoint/GetAncestor. Other backends return no target.
+The source/control window is excluded. No tab is split into new panes.
+
+The Mac debug GUI build passed. The native placement smoke test now verifies
+hit testing on both the 2x and 1x display, including a front overlapping window.
+The desktop callback and disposable local tmux integration tests were rerun.
+Actual mouse dragging and Windows build/GUI testing remain manual checks;
+relaunch the rebuilt packaged app, drag a tab title onto another tmux window,
+then confirm the selected tab still accepts input into the expected server pane.
+
+
+### Drag a tmux tab onto exposed desktop
+
+A drag onto exposed desktop now calls the same whole-tab move helper with a
+new mux window and an explicit screen-coordinate position. On Mac, that
+position takes precedence over saved placement and supplies the destination
+screen's DPI/backing scale before font and native geometry creation. Mac
+uses AppKit frontmost-window lookup plus CoreGraphics desktop-element exclusion;
+Windows recognizes the desktop shell window, while other applications and
+ineligible terminal windows reject the drop. Unsupported backends reject it.
+
+Mac GUI/CLI build, configuration callbacks and disposable local tmux integration
+passed. The native smoke test rejected desktop classification on the shown
+terminal and passed initial-size/stale-DPI checks on both 2x and 1x displays.
+No exposed desktop points were available in its sampled grid, so the positive
+empty-desktop case and the physical drag gesture still require manual checking.
+Quit and relaunch `target/WezTerm Tmux.app`, drag a remote tab title onto an
+exposed desktop region on each display, and check placement, size and input.
+Also drop over another application to verify no movement. Windows build and
+GUI checks remain unperformed; use the existing Windows build and repeat those
+steps, plus dragging onto another tmux window to merge.
+
+
+### Expanded tear-off destinations and Escape cancellation
+
+The desktop-only restriction rejected the other application's visible surface
+in the user's screenshot. Tear-off now accepts any on-screen point without a
+frontmost window owned by this WezTerm connection. A visible remote-only tmux
+window remains a merge target; the source, control and local-shell windows
+remain blocked. Thus an obscured WezTerm window does not intercept the drop.
+Raw and translated Escape events cancel the pending drag before normal key
+bindings or terminal input; subsequent movement and mouse release cannot commit
+it. The next tab press starts a new drag.
+
+Mac GUI/CLI build and disposable local tmux regression passed. Physical drag and
+Escape interaction remain manual checks: drag onto another app to tear off,
+onto a remote tmux window to merge, and press Escape before releasing for each.
+Verify no window or tab changes on cancellation, then verify a new drag works.
+Windows build and GUI execution remain unverified.

@@ -59,6 +59,7 @@ pub(crate) struct TmuxTab {
     pub tab_id: TabId, // local tab ID
     pub tmux_window_id: TmuxWindowId,
     pub layout_csum: String,
+    pub position_key: String,
     pub panes: HashSet<TmuxPaneId>, // tmux panes within tmux window
 }
 
@@ -76,6 +77,7 @@ pub(crate) struct TmuxDomainState {
     pub attach_state: Mutex<AttachState>,
     pending_splits: Mutex<VecDeque<promise::Promise<TmuxPaneId>>>,
     pub backlog: Mutex<HashMap<TmuxPaneId, Vec<u8>>>,
+    pub pending_window_targets: Mutex<HashMap<TmuxWindowId, WindowId>>,
     // Snapshot at attach so a config reload cannot change the mapping mid-session.
     pub window_per_os_window: bool,
 }
@@ -302,7 +304,7 @@ impl TmuxDomainState {
     /// create a tmux window
     pub fn create_tmux_window(&self) {
         let mut cmd_queue = self.cmd_queue.as_ref().lock();
-        cmd_queue.push_back(Box::new(NewWindow));
+        cmd_queue.push_back(Box::new(NewWindow { target: None }));
         TmuxDomainState::schedule_send_next_command(self.domain_id);
     }
 
@@ -352,10 +354,57 @@ impl TmuxDomain {
             attach_state: Mutex::new(AttachState::Init),
             pending_splits: Mutex::new(VecDeque::default()),
             backlog: Mutex::new(HashMap::default()),
+            pending_window_targets: Mutex::new(HashMap::default()),
             window_per_os_window: config::configuration().tmux_window_per_os_window,
         });
 
         Self { inner }
+    }
+
+    pub fn create_window(&self, target: Option<WindowId>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            *self.inner.state.lock() != State::Exit,
+            "tmux connection is closed"
+        );
+        self.inner
+            .cmd_queue
+            .lock()
+            .push_back(Box::new(NewWindow { target }));
+        TmuxDomainState::schedule_send_next_command(self.inner.domain_id);
+        Ok(())
+    }
+
+    pub fn position_key_for_tab(&self, tab: TabId) -> Option<String> {
+        self.inner
+            .gui_tabs
+            .lock()
+            .values()
+            .find(|t| t.tab_id == tab)
+            .map(|t| t.position_key.clone())
+    }
+
+    pub fn rename_window(&self, tab: TabId, name: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !name.chars().any(char::is_control),
+            "Title cannot contain control characters"
+        );
+        let window = self
+            .inner
+            .gui_tabs
+            .lock()
+            .values()
+            .find(|t| t.tab_id == tab)
+            .map(|t| t.tmux_window_id)
+            .ok_or_else(|| anyhow::anyhow!("tmux tab not found"))?;
+        self.inner
+            .cmd_queue
+            .lock()
+            .push_back(Box::new(crate::tmux_commands::RenameWindow {
+                window,
+                name: name.to_string(),
+            }));
+        TmuxDomainState::schedule_send_next_command(self.inner.domain_id);
+        Ok(())
     }
 
     fn send_next_command(&self) {

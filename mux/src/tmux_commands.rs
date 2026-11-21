@@ -101,6 +101,7 @@ impl TmuxDomainState {
                     tab_id: *tab_id,
                     tmux_window_id: target.window_id,
                     layout_csum: target.layout_csum.clone(),
+                    position_key: target.position_key.clone(),
                     panes: HashSet::new(),
                 },
             );
@@ -509,7 +510,14 @@ impl TmuxDomainState {
                 }
             }
 
-            if self.window_per_os_window {
+            let requested_target = self
+                .pending_window_targets
+                .lock()
+                .remove(&window.window_id)
+                .filter(|id| mux.get_window(*id).is_some());
+            if let Some(target) = requested_target {
+                mux.add_tab_to_window(&tab, target)?;
+            } else if self.window_per_os_window {
                 // Use the transport window's workspace, even if focus changed
                 // while the remote window list was being fetched.
                 let workspace = mux
@@ -811,9 +819,8 @@ impl TmuxCommand for ListAllWindows {
                 #{{session_id}} #{{window_id}} \
                 #{{window_width}} #{{window_height}} \
                 #{{window_active}} \
-                #{{window_name}} \
                 #{{window_layout}} \
-                #{{history_limit}}' -t ${}\n",
+                #{{history_limit}} #{{window_name}}' -t ${}\n",
             self.session_id
         )
     }
@@ -833,7 +840,7 @@ impl TmuxCommand for ListAllWindows {
             let (position_key, line) = line
                 .split_once('\t')
                 .ok_or_else(|| anyhow!("missing tmux window position key"))?;
-            let mut fields = line.split(' ');
+            let mut fields = line.splitn(8, ' ');
             let session_id =
                 parse_sigil_number(fields.next().ok_or_else(|| anyhow!("missing session_id"))?)?;
             let window_id =
@@ -851,10 +858,6 @@ impl TmuxCommand for ListAllWindows {
                 .ok_or_else(|| anyhow!("missing window_active"))?
                 .parse::<usize>()?;
 
-            let window_name = fields
-                .next()
-                .ok_or_else(|| anyhow!("missing window_name"))?;
-
             let window_layout = fields
                 .next()
                 .ok_or_else(|| anyhow!("missing window_layout"))?;
@@ -863,6 +866,10 @@ impl TmuxCommand for ListAllWindows {
                 .next()
                 .ok_or_else(|| anyhow!("missing history_limit"))?
                 .parse::<isize>()?;
+
+            let window_name = fields
+                .next()
+                .ok_or_else(|| anyhow!("missing window_name"))?;
 
             let window_active = window_active == 1;
 
@@ -1078,10 +1085,12 @@ impl TmuxCommand for SendKeys {
 }
 
 #[derive(Debug)]
-pub(crate) struct NewWindow;
+pub(crate) struct NewWindow {
+    pub target: Option<crate::window::WindowId>,
+}
 impl TmuxCommand for NewWindow {
     fn get_command(&self, _domain_id: DomainId) -> String {
-        "new-window\n".to_owned()
+        "new-window -P -F '#{window_id}'\n".to_owned()
     }
 
     fn process_result(&self, domain_id: DomainId, result: &Guarded) -> anyhow::Result<()> {
@@ -1090,6 +1099,40 @@ impl TmuxCommand for NewWindow {
             log::error!("{error}");
             anyhow::bail!("{error}");
         }
+        if let Some(target) = self.target {
+            let id: u64 = result
+                .output
+                .trim()
+                .strip_prefix('@')
+                .ok_or_else(|| anyhow::anyhow!("Missing new tmux window id"))?
+                .parse()?;
+            let domain = Mux::get()
+                .get_domain(domain_id)
+                .ok_or_else(|| anyhow::anyhow!("Tmux domain lost"))?;
+            let tmux = domain
+                .downcast_ref::<crate::tmux::TmuxDomain>()
+                .ok_or_else(|| anyhow::anyhow!("Not tmux"))?;
+            tmux.inner.pending_window_targets.lock().insert(id, target);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RenameWindow {
+    pub window: u64,
+    pub name: String,
+}
+impl TmuxCommand for RenameWindow {
+    fn get_command(&self, _domain_id: DomainId) -> String {
+        format!(
+            "rename-window -t @{} '{}'\n",
+            self.window,
+            self.name.replace("'", "'\\''")
+        )
+    }
+    fn process_result(&self, _domain_id: DomainId, result: &Guarded) -> anyhow::Result<()> {
+        anyhow::ensure!(!result.error, "tmux rename failed: {}", result.output);
         Ok(())
     }
 }

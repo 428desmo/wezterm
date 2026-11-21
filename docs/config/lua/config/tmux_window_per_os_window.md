@@ -19,8 +19,11 @@ the next attachment to that session restores the already-open control window.
 Its terminal rows and columns are also saved locally when resized and restored
 on reattachment. Pixel dimensions are recalculated for the destination DPI.
 Input, output, history capture and resizing use the existing tmux
-implementation. Initially test with one pane per tmux window; runtime window
-creation and split layouts have not been validated with this option.
+implementation. Initially test with one pane per tmux window. Runtime window
+creation is covered by the local Mac GUI smoke test; split layouts remain
+unvalidated. The optional [tmux Desktop profile](../../../tmux-desktop.md)
+adds saved SSH connections and GUI actions for creating, grouping and separating
+tmux tabs and changing titles.
 
 On macOS and Windows, native window moves are saved locally in
 `tmux-window-positions.json` in WezTerm's data directory (normally

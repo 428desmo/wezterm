@@ -46,6 +46,46 @@ impl UserData for MuxTab {
             let tab = this.resolve(&mux)?;
             Ok(tab.set_title(&title))
         });
+        methods.add_method(
+            "move_to_window",
+            |_, this, destination: Option<WindowId>| {
+                let mux = get_mux()?;
+                let id = mux
+                    .move_tab_to_window(this.0, destination)
+                    .map_err(mlua::Error::external)?;
+                Ok(MuxWindow(id))
+            },
+        );
+        methods.add_method("spawn_tmux_window", |_, this, as_tab: bool| {
+            let mux = get_mux()?;
+            let tab = this.resolve(&mux)?;
+            let domain = tab
+                .get_active_pane()
+                .and_then(|p| mux.get_domain(p.domain_id()))
+                .ok_or_else(|| mlua::Error::external("No domain"))?;
+            let tmux = domain
+                .downcast_ref::<mux::tmux::TmuxDomain>()
+                .ok_or_else(|| mlua::Error::external("Select a tmux tab first"))?;
+            let target = if as_tab {
+                mux.window_containing_tab(this.0)
+            } else {
+                None
+            };
+            tmux.create_window(target).map_err(mlua::Error::external)
+        });
+        methods.add_method("rename_tmux_window", |_, this, name: String| {
+            let mux = get_mux()?;
+            let tab = this.resolve(&mux)?;
+            let domain = tab
+                .get_active_pane()
+                .and_then(|p| mux.get_domain(p.domain_id()))
+                .ok_or_else(|| mlua::Error::external("No domain"))?;
+            let tmux = domain
+                .downcast_ref::<mux::tmux::TmuxDomain>()
+                .ok_or_else(|| mlua::Error::external("Select a tmux tab first"))?;
+            tmux.rename_window(this.0, &name)
+                .map_err(mlua::Error::external)
+        });
         methods.add_method("active_pane", |_, this, _: ()| {
             let mux = get_mux()?;
             let tab = this.resolve(&mux)?;

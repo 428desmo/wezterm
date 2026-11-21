@@ -451,6 +451,8 @@ pub struct TermWindow {
 
     ui_items: Vec<UIItem>,
     dragging: Option<(UIItem, MouseEvent)>,
+    tab_drag: Option<(TabId, MouseEvent, bool)>,
+    tab_drag_cancelled: bool,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -608,9 +610,11 @@ impl TermWindow {
             })
             .collect();
         let position = Mux::get().get_window(mux_window_id).and_then(|window| {
-            window
-                .tmux_position_key()
-                .and_then(|key| mux::tmux_layout::restore(key, &displays))
+            window.get_initial_position().clone().or_else(|| {
+                window
+                    .tmux_position_key()
+                    .and_then(|key| mux::tmux_layout::restore(key, &displays))
+            })
         })?;
         if let GuiPosition {
             x: Dimension::Pixels(x),
@@ -883,6 +887,8 @@ impl TermWindow {
             semantic_zones: HashMap::new(),
             ui_items: vec![],
             dragging: None,
+            tab_drag: None,
+            tab_drag_cancelled: false,
             last_ui_item: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
@@ -950,7 +956,12 @@ impl TermWindow {
         .await?;
         tw.borrow_mut().window.replace(window.clone());
 
-        if saved_placement.is_none() {
+        if saved_placement.is_none()
+            && mux
+                .get_window(mux_window_id)
+                .and_then(|w| w.get_initial_position().clone())
+                .is_none()
+        {
             tw.borrow_mut().restore_tmux_window_position(&window);
         }
 

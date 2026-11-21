@@ -474,6 +474,48 @@ fn set_window_position(window: *mut Object, coords: ScreenPoint) {
 }
 
 impl Window {
+    pub(crate) fn is_desktop_at_screen_point(point: ScreenPoint) -> bool {
+        use core_graphics::window::*;
+        // Exclude Finder's desktop elements, but keep ordinary Finder windows,
+        // the Dock and other applications as blocked drop destinations.
+        unsafe {
+            let number: NSInteger = msg_send![class!(NSWindow),
+                windowNumberAtPoint: screen_point_to_cartesian(point)
+                belowWindowWithWindowNumber: 0 as NSInteger];
+            if number == 0 {
+                return true;
+            }
+            copy_window_info(
+                kCGWindowListOptionIncludingWindow | kCGWindowListExcludeDesktopElements,
+                number as CGWindowID,
+            )
+            .map_or(false, |windows| windows.len() == 0)
+        }
+    }
+
+    pub(crate) fn at_screen_point(point: ScreenPoint) -> Option<Self> {
+        let connection = Connection::get()?;
+        unsafe {
+            let point = screen_point_to_cartesian(point);
+            // Ask AppKit for the actual frontmost hit, including windows from
+            // other applications. Do not drop into an obscured terminal.
+            let number: NSInteger = msg_send![class!(NSWindow),
+                windowNumberAtPoint: point belowWindowWithWindowNumber: 0 as NSInteger];
+            for (&id, inner) in connection.windows.borrow().iter() {
+                if let Ok(inner) = inner.try_borrow() {
+                    if inner.window.windowNumber() == number {
+                        return Some(Self {
+                            id,
+                            ns_window: *inner.window,
+                            ns_view: *inner.view,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn request_inner_size(&self, width: usize, height: usize, expected_dpi: Option<usize>) {
         Connection::with_window_inner(self.id, move |inner| {
             let current_dpi = unsafe {

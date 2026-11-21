@@ -1256,6 +1256,90 @@ impl Mux {
         Ok((pane, size))
     }
 
+    /// Reparent a whole tab without changing its panes or remote tmux identity.
+    pub fn move_tab_to_window(
+        &self,
+        tab_id: TabId,
+        target: Option<WindowId>,
+    ) -> anyhow::Result<WindowId> {
+        self.move_tab_to_window_at(tab_id, target, None)
+    }
+
+    pub fn move_tab_to_window_at(
+        &self,
+        tab_id: TabId,
+        target: Option<WindowId>,
+        position: Option<GuiPosition>,
+    ) -> anyhow::Result<WindowId> {
+        let tab = self
+            .get_tab(tab_id)
+            .ok_or_else(|| anyhow!("Tab not found"))?;
+        let source = self
+            .window_containing_tab(tab_id)
+            .ok_or_else(|| anyhow!("Tab has no window"))?;
+        if target == Some(source) {
+            return Ok(source);
+        }
+        let workspace = self
+            .get_window(source)
+            .ok_or_else(|| anyhow!("Source window missing"))?
+            .get_workspace()
+            .to_string();
+        let mut builder = None;
+        let destination = match target {
+            Some(id) => {
+                anyhow::ensure!(self.get_window(id).is_some(), "Destination window missing");
+                id
+            }
+            None => {
+                let window = self.new_empty_window(Some(workspace), position);
+                let id = *window;
+                builder = Some(window);
+                id
+            }
+        };
+        self.get_window_mut(source)
+            .ok_or_else(|| anyhow!("Source window missing"))?
+            .remove_tab_id(tab_id);
+        self.add_tab_to_window(&tab, destination)?;
+        if let Some(active) = self
+            .get_window(destination)
+            .and_then(|w| w.get_active_tab().cloned())
+        {
+            tab.resize(active.get_size());
+        }
+        if let Some(mut window) = self.get_window_mut(destination) {
+            if let Some(idx) = window.get_tab_idx_for_id(tab_id) {
+                window.remember_and_set_active_tab_idx(idx);
+            }
+        }
+        for id in [source, destination] {
+            let first = self
+                .get_window(id)
+                .and_then(|w| w.iter_tabs().next().cloned());
+            if let Some(first) = first {
+                let key = first
+                    .get_active_pane()
+                    .and_then(|p| self.get_domain(p.domain_id()))
+                    .and_then(|d| {
+                        d.downcast_ref::<crate::tmux::TmuxDomain>()?
+                            .position_key_for_tab(first.tab_id())
+                    });
+                if let Some(key) = key {
+                    if let Some(mut window) = self.get_window_mut(id) {
+                        window.set_tmux_position_key(key);
+                    }
+                }
+            }
+            self.notify(MuxNotification::WindowInvalidated(id));
+        }
+        if let Some(window) = builder.as_mut() {
+            window.notify();
+        }
+        self.prune_dead_windows();
+        Ok(destination)
+    }
+
     pub async fn move_pane_to_new_tab(
         &self,
         pane_id: PaneId,

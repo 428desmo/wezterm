@@ -53,6 +53,14 @@ pub(crate) fn get_appearance() -> Appearance {
 }
 
 impl ConnectionOps for Connection {
+    fn is_desktop_at_screen_point(&self, point: crate::ScreenPoint) -> bool {
+        super::window::Window::is_desktop_at_screen_point(point)
+    }
+
+    fn window_at_screen_point(&self, point: crate::ScreenPoint) -> Option<crate::Window> {
+        super::window::Window::at_screen_point(point)
+    }
+
     fn terminate_message_loop(&self) {
         unsafe {
             PostQuitMessage(0);

@@ -95,7 +95,9 @@ impl Parser {
         for (index, &byte) in bytes.iter().enumerate() {
             // Do not bypass VTParse for the DCS terminator or cancellation.
             // These may arrive without %exit (for example during shutdown).
-            if matches!(byte, 0x1b | 0x9c | 0x18 | 0x1a) {
+            if matches!(byte, 0x1b | 0x18 | 0x1a)
+                || (byte == 0x9c && !tmux_parser.is_utf8_continuation(byte))
+            {
                 return (events, index, None);
             }
             match tmux_parser.advance_byte(byte) {
@@ -119,51 +121,54 @@ impl Parser {
 
     pub fn parse<F: FnMut(Action)>(&mut self, bytes: &[u8], mut callback: F) {
         #[cfg(feature = "tmux_cc")]
-        let mut bytes = bytes;
-        #[cfg(feature = "tmux_cc")]
-        if self.state.borrow().tmux_state.is_some() {
-            let (events, consumed, fallback) = self.advance_tmux_bytes(bytes);
-            let exited = matches!(events.last(), Some(Event::Exit { .. }));
-            if !events.is_empty() {
-                callback(Action::DeviceControl(DeviceControlMode::TmuxEvents(
-                    Box::new(events),
-                )));
-            }
-            bytes = &bytes[consumed..];
-            if let Some(output) = fallback {
-                // An interrupted transport may print ordinary text without
-                // sending either %exit or ST. Leave the DCS and replay that
-                // text as terminal output, retaining preceding tmux events.
-                self.state.borrow_mut().tmux_state = None;
-                self.state_machine = VTParser::new();
-                callback(Action::DeviceControl(DeviceControlMode::Exit));
-                self.state_machine.parse(
-                    &output,
-                    &mut Performer {
-                        callback: &mut callback,
-                        state: &mut self.state.borrow_mut(),
-                    },
-                );
-            } else if exited || !bytes.is_empty() {
-                self.state.borrow_mut().tmux_state = None;
-            } else {
-                return;
-            }
-        }
-
-        #[cfg(feature = "tmux_cc")]
         {
-            let mut state = self.state.borrow_mut();
-            let mut perform = Performer {
-                callback: &mut callback,
-                state: &mut state,
-            };
-            for &byte in bytes {
-                self.state_machine.parse_byte(byte, &mut perform);
-                if let Some(output) = perform.state.tmux_fallback.take() {
-                    self.state_machine = VTParser::new();
-                    (perform.callback)(Action::DeviceControl(DeviceControlMode::Exit));
-                    self.state_machine.parse(&output, &mut perform);
+            let mut offset = 0;
+            while offset < bytes.len() {
+                if self.state.borrow().tmux_state.is_some() {
+                    let (events, consumed, fallback) = self.advance_tmux_bytes(&bytes[offset..]);
+                    let exited = matches!(events.last(), Some(Event::Exit { .. }));
+                    if !events.is_empty() {
+                        callback(Action::DeviceControl(DeviceControlMode::TmuxEvents(
+                            Box::new(events),
+                        )));
+                    }
+                    offset += consumed;
+                    if let Some(output) = fallback {
+                        self.state.borrow_mut().tmux_state = None;
+                        self.state_machine = VTParser::new();
+                        callback(Action::DeviceControl(DeviceControlMode::Exit));
+                        self.state_machine.parse(
+                            &output,
+                            &mut Performer {
+                                callback: &mut callback,
+                                state: &mut self.state.borrow_mut(),
+                            },
+                        );
+                    } else if exited || offset < bytes.len() {
+                        self.state.borrow_mut().tmux_state = None;
+                    } else {
+                        break;
+                    }
+                }
+                let mut state = self.state.borrow_mut();
+                let mut perform = Performer {
+                    callback: &mut callback,
+                    state: &mut state,
+                };
+                while offset < bytes.len() {
+                    self.state_machine.parse_byte(bytes[offset], &mut perform);
+                    offset += 1;
+                    if let Some(output) = perform.state.tmux_fallback.take() {
+                        self.state_machine = VTParser::new();
+                        (perform.callback)(Action::DeviceControl(DeviceControlMode::Exit));
+                        self.state_machine.parse(&output, &mut perform);
+                    }
+                    // Bypass VTParse immediately after entering control mode,
+                    // including within this read. UTF-8 continuation bytes in
+                    // titles must not be interpreted as raw C1 controls.
+                    if perform.state.tmux_state.is_some() {
+                        break;
+                    }
                 }
             }
         }
@@ -922,6 +927,22 @@ mod test {
                 .collect();
             assert_eq!(printed, "Connection to test-host closed.shell$ tail");
             assert!(parser.state.borrow().tmux_state.is_none());
+        }
+    }
+
+    #[cfg(feature = "tmux_cc")]
+    #[test]
+    fn tmux_unicode_title_is_not_a_c1_terminator() {
+        let input = "\x1bP1000p%window-renamed @0 日本語\n%exit\n\x1b\\done";
+        for split in 0..=input.len() {
+            let mut parser = Parser::new();
+            let mut actions = parser.parse_as_vec(&input.as_bytes()[..split]);
+            actions.extend(parser.parse_as_vec(&input.as_bytes()[split..]));
+            assert!(actions.iter().any(|action| match action {
+                Action::DeviceControl(DeviceControlMode::TmuxEvents(events)) => events.iter().any(|event|
+                    matches!(event, Event::WindowRenamed { name, .. } if name == "日本語")),
+                _ => false,
+            }), "split={split}");
         }
     }
 

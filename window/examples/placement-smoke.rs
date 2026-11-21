@@ -53,6 +53,69 @@ fn main() -> anyhow::Result<()> {
                 .await?;
                 native.show();
                 async_io::Timer::after(std::time::Duration::from_millis(800)).await;
+                let hit_point = screen.rect.origin + euclid::vec2(100, 130);
+                anyhow::ensure!(
+                    Connection::get().unwrap().window_at_screen_point(hit_point)
+                        == Some(native.clone()),
+                    "Native hit test missed the shown window on {}",
+                    screen.id
+                );
+                anyhow::ensure!(
+                    !Connection::get()
+                        .unwrap()
+                        .is_desktop_at_screen_point(hit_point),
+                    "A terminal window was classified as empty desktop"
+                );
+                let mut desktop_points = 0;
+                for x in 1..10 {
+                    for y in 1..10 {
+                        let point = screen.rect.origin
+                            + euclid::vec2(
+                                screen.rect.width() * x / 10,
+                                screen.rect.height() * y / 10,
+                            );
+                        if Connection::get().unwrap().is_desktop_at_screen_point(point) {
+                            desktop_points += 1;
+                            anyhow::ensure!(
+                                Connection::get()
+                                    .unwrap()
+                                    .window_at_screen_point(point)
+                                    .is_none(),
+                                "Desktop classification overlaps a terminal"
+                            );
+                        }
+                    }
+                }
+                println!(
+                    "Exposed desktop sample points on {}: {}",
+                    screen.id, desktop_points
+                );
+                let overlap = Window::new_window(
+                    "placement-smoke",
+                    "placement-smoke-overlap",
+                    RequestedWindowGeometry {
+                        width: Dimension::Pixels(width as f32),
+                        height: Dimension::Pixels(height as f32),
+                        initial_placement: Some(InitialWindowPlacement {
+                            position: screen.rect.origin + euclid::vec2(30, 60),
+                            backing_scale: screen.backing_scale,
+                        }),
+                        ..Default::default()
+                    },
+                    None,
+                    Rc::new(FontConfiguration::new(None, screen.dpi as usize)?),
+                    |_, _| {},
+                )
+                .await?;
+                overlap.show();
+                async_io::Timer::after(std::time::Duration::from_millis(150)).await;
+                anyhow::ensure!(
+                    Connection::get().unwrap().window_at_screen_point(hit_point)
+                        == Some(overlap.clone()),
+                    "Native hit test did not select the front window"
+                );
+                overlap.close();
+                async_io::Timer::after(std::time::Duration::from_millis(150)).await;
                 for _ in 0..4 {
                     // Model an old backing notification queued during startup.
                     // Its pixel request must not be applied at the new scale.

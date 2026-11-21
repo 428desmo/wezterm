@@ -849,6 +849,11 @@ impl Parser {
         }
     }
 
+    pub(crate) fn is_utf8_continuation(&self, byte: u8) -> bool {
+        (0x80..=0xbf).contains(&byte)
+            && std::str::from_utf8(&self.buffer).is_err_and(|error| error.error_len().is_none())
+    }
+
     pub fn advance_byte(&mut self, c: u8) -> Result<Option<Event>> {
         if c == b'\n' {
             self.process_line()
