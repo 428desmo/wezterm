@@ -797,6 +797,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             keys: vec![], args: &[ArgType::ActiveTab],
             menubar: &["Window", "Move Tab to Window"], icon: None,
         },
+        RenameTab => CommandDef {
+            brief: "Rename Tab".into(), doc: "Set the tab title; tmux tabs rename the server window".into(),
+            keys: vec![], args: &[ArgType::ActiveTab], menubar: &["Window"], icon: Some("md_rename_box"),
+        },
+        RenameWindow => CommandDef {
+            brief: "Rename Window".into(), doc: "Set the native window title".into(),
+            keys: vec![], args: &[ArgType::ActiveWindow], menubar: &["Window"], icon: Some("md_rename_box"),
+        },
         SpawnWindow => CommandDef {
             brief: "New Window".into(),
             doc: "Launches the default program into a new window".into(),
@@ -2114,6 +2122,8 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ScrollToBottom,
         // ----------------- Window
         MoveTabToNewWindow,
+        RenameTab,
+        RenameWindow,
         ToggleFullScreen,
         ToggleAlwaysOnTop,
         ToggleAlwaysOnBottom,

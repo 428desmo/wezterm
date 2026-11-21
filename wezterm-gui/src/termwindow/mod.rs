@@ -2483,6 +2483,59 @@ impl TermWindow {
         promise::spawn::spawn(future).detach();
     }
 
+    fn rename_title(&mut self, window_title: bool) {
+        let mux = Mux::get();
+        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+            Some(tab) => tab,
+            None => return,
+        };
+        let tab_id = tab.tab_id();
+        let window_id = self.mux_window_id;
+        let initial = if window_title {
+            mux.get_window(window_id)
+                .map(|w| w.get_title().to_owned())
+                .unwrap_or_default()
+        } else {
+            tab.get_title()
+        };
+        let (overlay, future) = start_overlay(self, &tab, move |_, mut term| {
+            crate::overlay::prompt::read_line_prompt(
+                &mut term,
+                if window_title {
+                    "Window title (empty for automatic)"
+                } else {
+                    "Tab title (tmux tabs also rename the server window)"
+                },
+                "> ",
+                Some(&initial),
+            )
+        });
+        self.assign_overlay(tab_id, overlay);
+        promise::spawn::spawn(async move {
+            if let Some(title) = future.await? {
+                let mux = Mux::get();
+                if window_title {
+                    if let Some(mut window) = mux.get_window_mut(window_id) {
+                        window.set_title(&title);
+                    }
+                } else if let Some(tab) = mux.get_tab(tab_id) {
+                    if let Some(domain) = tab
+                        .get_active_pane()
+                        .and_then(|p| mux.get_domain(p.domain_id()))
+                    {
+                        if let Some(tmux) = domain.downcast_ref::<mux::tmux::TmuxDomain>() {
+                            tmux.rename_window(tab_id, &title)?;
+                        } else {
+                            tab.set_title(&title);
+                        }
+                    }
+                }
+            }
+            anyhow::Result::<()>::Ok(())
+        })
+        .detach();
+    }
+
     fn show_prompt_input_line(&mut self, args: &PromptInputLine) {
         let mux = Mux::get();
         let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
@@ -2583,7 +2636,36 @@ impl TermWindow {
         self.show_launcher_impl(args, 0);
     }
 
+    fn show_tab_context_menu(&mut self, tab_idx: Option<usize>) {
+        if let Some(index) = tab_idx {
+            self.activate_tab(index as isize).ok();
+        }
+        let mut actions = vec![];
+        if tab_idx.is_some() {
+            actions.push(("Rename Tab".to_string(), KeyAssignment::RenameTab));
+        }
+        actions.push(("Rename Window".to_string(), KeyAssignment::RenameWindow));
+        actions.push(("Tab Navigator".to_string(), KeyAssignment::ShowTabNavigator));
+        let args = LauncherActionArgs {
+            title: Some("Tab / Window".to_string()),
+            flags: LauncherFlags::ZERO,
+            help_text: Some("Enter=select  Esc=cancel".to_string()),
+            fuzzy_help_text: None,
+            alphabet: None,
+        };
+        self.show_launcher_with_actions(args, 0, actions);
+    }
+
     fn show_launcher_impl(&mut self, args: LauncherActionArgs, initial_choice_idx: usize) {
+        self.show_launcher_with_actions(args, initial_choice_idx, vec![]);
+    }
+
+    fn show_launcher_with_actions(
+        &mut self,
+        args: LauncherActionArgs,
+        initial_choice_idx: usize,
+        actions: Vec<(String, KeyAssignment)>,
+    ) {
         let mux_window_id = self.mux_window_id;
         let window = self.window.as_ref().unwrap().clone();
 
@@ -2629,7 +2711,8 @@ impl TermWindow {
                 &fuzzy_help_text,
                 &alphabet,
             )
-            .await;
+            .await
+            .with_actions(actions);
 
             let win = window.clone();
             win.notify(TermWindowNotif::Apply(Box::new(move |term_window| {
@@ -2832,6 +2915,8 @@ impl TermWindow {
                     Mux::get().move_tab_to_window(tab.tab_id(), target)?;
                 }
             }
+            RenameTab => self.rename_title(false),
+            RenameWindow => self.rename_title(true),
             SpawnWindow => {
                 self.spawn_command(&SpawnCommand::default(), SpawnWhere::NewWindow);
             }

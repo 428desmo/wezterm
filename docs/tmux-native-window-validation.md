@@ -655,3 +655,49 @@ order intact. Cross-window movement/tear-off retains the existing tmux opt-in.
 The GUI regression exercises MoveTab in both directions and checks identity;
 physical gestures and Escape need manual checks on Mac and Windows. The earlier
 native hit-test failure remains recorded and is not counted as a passing check.
+
+
+### Remove the tmux-only drag restriction
+
+A Windows report of a forbidden cursor exposed a remaining shared-code gate:
+can_drag_tab_between_windows required both tmux_window_per_os_window and a tab
+whose panes all belonged to TmuxDomain. Thus ordinary local/SSH tabs or a config
+without the tmux opt-in could never tear off, despite generic move actions.
+The drag path now uses the generic whole-tab move for all tabs and accepts any
+nonempty destination window in the same process. The tmux configuration still
+controls automatic mapping on attach; it no longer restricts explicit drags.
+Dropping on the source window body remains a no-op, while a different tab in
+its bar reorders and a point outside visible owned windows creates a new window.
+Escape cancellation is unchanged. Windows GUI execution remains unverified;
+rebuild the Windows GUI and try a local tab with default tmux configuration,
+a remote tab with the option disabled, and an opt-in remote tab, followed by
+merge/reorder/cancel checks. Existing native hit-test caveats remain applicable.
+
+The shared-code Mac GUI/CLI build passed. The disposable local integration test
+also passed after adding ordinary local-tab merge and tear-off checks, including
+stable tab/pane IDs, alongside the existing tmux creation/input regressions.
+This does not establish Windows mouse-gesture success or resolve the earlier
+native hit-test diagnostic failure. A rebuilt Windows executable is required;
+updating Lua settings alone does not install this change.
+
+
+### Built-in title editing and tab context menu
+
+Title editing no longer requires the example Lua palette hook. RenameTab and
+RenameWindow are built-in actions with palette/Window-menu entries on all
+platforms. Double-clicking a tab opens the title prompt; right-clicking a tab
+opens a menu with Rename Tab, Rename Window and the existing Tab Navigator.
+Right-clicking unoccupied tab-bar/status space offers Rename Window and the
+navigator. Native OS title-bar double-click behavior remains unchanged.
+The menu reuses the existing Launcher overlay, and native/Lua prompts share
+one line editor. The prompt captures original tab/window IDs and tmux tabs use
+the existing server-side rename command. The example's duplicate Lua hook and
+its mock callback test were replaced with a built-in-action loading test.
+
+Mac GUI/CLI build, action/config-loading checks and disposable local tmux GUI
+regression passed. A Rust test feeds the actual prompt input queue to verify
+Unicode edits, explicit empty input and cancellation. Physical double-click/
+right-click/selection and Windows build/GUI execution remain unverified. Build
+the Windows GUI from this source, test an inactive tab's context menu, confirm
+local vs server-side tmux titles, window title reset, cancellation and existing
+tab drag/Tab Navigator operation. Existing native hit-test caveats remain.

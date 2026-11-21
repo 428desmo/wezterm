@@ -23,19 +23,7 @@ use wezterm_dynamic::ToDynamic;
 use wezterm_term::input::{MouseButton, MouseEventKind as TMEK};
 use wezterm_term::{ClickPosition, LastMouseClick, StableRowIndex};
 
-fn is_tmux_tab(tab: &mux::tab::Tab) -> bool {
-    let panes = tab.iter_panes_ignoring_zoom();
-    !panes.is_empty()
-        && panes.iter().all(|p| {
-            Mux::get()
-                .get_domain(p.pane.domain_id())
-                .map_or(false, |domain| {
-                    domain.downcast_ref::<mux::tmux::TmuxDomain>().is_some()
-                })
-        })
-}
-
-fn tmux_tab_drop_target(
+fn tab_drop_target(
     source: mux::window::WindowId,
     point: window::ScreenPoint,
 ) -> Option<Option<mux::window::WindowId>> {
@@ -54,9 +42,9 @@ fn tmux_tab_drop_target(
     let target = crate::frontend::front_end().mux_window_for_native_window(&native)?;
     let mux = Mux::get();
     let eligible = target != source
-        && mux.get_window(target).map_or(false, |window| {
-            window.count_tabs() > 0 && window.iter_tabs().all(|tab| is_tmux_tab(tab))
-        });
+        && mux
+            .get_window(target)
+            .map_or(false, |window| window.count_tabs() > 0);
     eligible.then_some(Some(target))
 }
 
@@ -68,13 +56,6 @@ impl super::TermWindow {
             }
             _ => None,
         }
-    }
-
-    fn can_drag_tab_between_windows(&self, tab_id: mux::tab::TabId) -> bool {
-        self.config.tmux_window_per_os_window
-            && Mux::get()
-                .get_tab(tab_id)
-                .map_or(false, |tab| is_tmux_tab(&tab))
     }
 
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
@@ -199,12 +180,8 @@ impl super::TermWindow {
                                 }
                                 return;
                             }
-                            if let Some(target) = self
-                                .can_drag_tab_between_windows(tab)
-                                .then(|| {
-                                    tmux_tab_drop_target(self.mux_window_id, event.screen_coords)
-                                })
-                                .flatten()
+                            if let Some(target) =
+                                tab_drop_target(self.mux_window_id, event.screen_coords)
                             {
                                 let point = event.screen_coords;
                                 let position = config::GuiPosition {
@@ -264,15 +241,12 @@ impl super::TermWindow {
                 if self.tab_drag_cancelled {
                     return;
                 }
-                if let Some((tab, start, moved)) = self.tab_drag.as_mut() {
+                if let Some((_, start, moved)) = self.tab_drag.as_mut() {
                     *moved |= (start.screen_coords.x - event.screen_coords.x).abs() >= 10
                         || (start.screen_coords.y - event.screen_coords.y).abs() >= 10;
                     if *moved {
-                        let tab = *tab;
                         let allowed = self.tab_drag_reorder_target(&event).is_some()
-                            || (self.can_drag_tab_between_windows(tab)
-                                && tmux_tab_drop_target(self.mux_window_id, event.screen_coords)
-                                    .is_some());
+                            || tab_drop_target(self.mux_window_id, event.screen_coords).is_some();
                         context.set_cursor(Some(if allowed {
                             CursorIcon::Grabbing
                         } else {
@@ -586,6 +560,11 @@ impl super::TermWindow {
             WMEK::Press(MousePress::Left) => match item {
                 TabBarItem::Tab { tab_idx, .. } => {
                     self.activate_tab(tab_idx as isize).ok();
+                    if self.last_mouse_click.as_ref().map(|click| click.streak) == Some(2) {
+                        self.tab_drag = None;
+                        self.rename_title(false);
+                        return;
+                    }
                     let tab = Mux::get()
                         .get_window(self.mux_window_id)
                         .and_then(|window| window.get_tab_at_idx(tab_idx).cloned());
@@ -653,16 +632,16 @@ impl super::TermWindow {
                 | TabBarItem::WindowButton(_) => {}
             },
             WMEK::Press(MousePress::Right) => match item {
-                TabBarItem::Tab { .. } => {
-                    self.show_tab_navigator();
+                TabBarItem::Tab { tab_idx, .. } => {
+                    self.show_tab_context_menu(Some(tab_idx));
                 }
                 TabBarItem::NewTabButton { .. } => {
                     self.do_new_tab_button_click(MousePress::Right);
                 }
-                TabBarItem::None
-                | TabBarItem::LeftStatus
-                | TabBarItem::RightStatus
-                | TabBarItem::WindowButton(_) => {}
+                TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {
+                    self.show_tab_context_menu(None);
+                }
+                TabBarItem::WindowButton(_) => {}
             },
             WMEK::Move => match item {
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {

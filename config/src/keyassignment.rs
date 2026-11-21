@@ -539,6 +539,8 @@ pub enum KeyAssignment {
     SpawnWindow,
     MoveTabToNewWindow,
     MoveTabToWindow(usize),
+    RenameTab,
+    RenameWindow,
     ToggleFullScreen,
     ToggleAlwaysOnTop,
     ToggleAlwaysOnBottom,

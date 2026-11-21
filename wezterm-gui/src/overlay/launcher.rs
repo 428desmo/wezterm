@@ -50,6 +50,7 @@ pub struct LauncherDomainEntry {
 }
 
 pub struct LauncherArgs {
+    actions: Vec<(String, KeyAssignment)>,
     flags: LauncherFlags,
     domains: Vec<LauncherDomainEntry>,
     tabs: Vec<LauncherTabEntry>,
@@ -64,6 +65,11 @@ pub struct LauncherArgs {
 }
 
 impl LauncherArgs {
+    pub fn with_actions(mut self, actions: Vec<(String, KeyAssignment)>) -> Self {
+        self.actions = actions;
+        self
+    }
+
     /// Must be called on the Mux thread!
     pub async fn new(
         title: &str,
@@ -154,6 +160,7 @@ impl LauncherArgs {
         };
 
         Self {
+            actions: vec![],
             flags,
             domains,
             tabs,
@@ -227,6 +234,11 @@ impl LauncherState {
     }
 
     fn build_entries(&mut self, args: LauncherArgs) {
+        self.entries
+            .extend(args.actions.iter().map(|(label, action)| Entry {
+                label: label.clone(),
+                action: action.clone(),
+            }));
         let config = configuration();
         // Pull in the user defined entries from the launch_menu
         // section of the configuration.

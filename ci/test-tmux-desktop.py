@@ -86,14 +86,23 @@ w.on('update-status',function()
   },original[1]:active_pane())
  elseif stage==5 then
   local found=false
+  local local_tab=nil
   for _,win in ipairs(w.mux.all_windows()) do
    for _,t in ipairs(win:tabs()) do
     local p=t:active_pane()
-    if p and p:get_domain_name()=='local' and p:get_lines_as_text():find('LOCAL_LAUNCH_MARKER',1,true) then found=true end
+    if p and p:get_domain_name()=='local' and p:get_lines_as_text():find('LOCAL_LAUNCH_MARKER',1,true) then found=true;local_tab=t end
    end
   end
   if not found then return end
   assert(#tabs==5,'Local launcher item created a tmux window')
+  local local_id=local_tab:tab_id();local local_pane=local_tab:active_pane():pane_id()
+  local target=original[1]:window():window_id()
+  local_tab:move_to_window(target)
+  assert(local_tab:window():window_id()==target,'local tab merge failed')
+  local separate=local_tab:move_to_window()
+  assert(separate:window_id()~=target,'local tab tear-off failed')
+  assert(local_tab:tab_id()==local_id and local_tab:active_pane():pane_id()==local_pane,'local tab identity changed')
+
   w.GLOBAL.desktop_test_stage=6
   local id=original[3]:tab_id();local pane_id=original[3]:active_pane():pane_id()
   original[1]:window():set_title('Custom OS window')
