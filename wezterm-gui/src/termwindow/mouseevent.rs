@@ -61,6 +61,22 @@ fn tmux_tab_drop_target(
 }
 
 impl super::TermWindow {
+    fn tab_drag_reorder_target(&self, event: &MouseEvent) -> Option<usize> {
+        match self.resolve_ui_item(event)?.item_type {
+            UIItemType::TabBar(TabBarItem::Tab { tab_idx, .. }) | UIItemType::CloseTab(tab_idx) => {
+                Some(tab_idx)
+            }
+            _ => None,
+        }
+    }
+
+    fn can_drag_tab_between_windows(&self, tab_id: mux::tab::TabId) -> bool {
+        self.config.tmux_window_per_os_window
+            && Mux::get()
+                .get_tab(tab_id)
+                .map_or(false, |tab| is_tmux_tab(&tab))
+    }
+
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
         let x = event.coords.x;
         let y = event.coords.y;
@@ -171,8 +187,24 @@ impl super::TermWindow {
                     if let Some((tab, _, moved)) = self.tab_drag.take() {
                         if moved {
                             context.set_cursor(Some(CursorIcon::Default));
-                            if let Some(target) =
-                                tmux_tab_drop_target(self.mux_window_id, event.screen_coords)
+                            if let Some(index) = self.tab_drag_reorder_target(&event) {
+                                let source_index = Mux::get()
+                                    .get_window(self.mux_window_id)
+                                    .and_then(|window| window.get_tab_idx_for_id(tab));
+                                if let Some(source_index) = source_index {
+                                    self.activate_tab(source_index as isize).ok();
+                                    if let Err(err) = self.move_tab(index) {
+                                        log::error!("Tab reorder failed: {err:#}");
+                                    }
+                                }
+                                return;
+                            }
+                            if let Some(target) = self
+                                .can_drag_tab_between_windows(tab)
+                                .then(|| {
+                                    tmux_tab_drop_target(self.mux_window_id, event.screen_coords)
+                                })
+                                .flatten()
                             {
                                 let point = event.screen_coords;
                                 let position = config::GuiPosition {
@@ -232,12 +264,15 @@ impl super::TermWindow {
                 if self.tab_drag_cancelled {
                     return;
                 }
-                if let Some((_, start, moved)) = self.tab_drag.as_mut() {
+                if let Some((tab, start, moved)) = self.tab_drag.as_mut() {
                     *moved |= (start.screen_coords.x - event.screen_coords.x).abs() >= 10
                         || (start.screen_coords.y - event.screen_coords.y).abs() >= 10;
                     if *moved {
-                        let allowed =
-                            tmux_tab_drop_target(self.mux_window_id, event.screen_coords).is_some();
+                        let tab = *tab;
+                        let allowed = self.tab_drag_reorder_target(&event).is_some()
+                            || (self.can_drag_tab_between_windows(tab)
+                                && tmux_tab_drop_target(self.mux_window_id, event.screen_coords)
+                                    .is_some());
                         context.set_cursor(Some(if allowed {
                             CursorIcon::Grabbing
                         } else {
@@ -551,14 +586,12 @@ impl super::TermWindow {
             WMEK::Press(MousePress::Left) => match item {
                 TabBarItem::Tab { tab_idx, .. } => {
                     self.activate_tab(tab_idx as isize).ok();
-                    if self.config.tmux_window_per_os_window {
-                        let tab = Mux::get()
-                            .get_window(self.mux_window_id)
-                            .and_then(|window| window.get_tab_at_idx(tab_idx).cloned());
-                        if let Some(tab) = tab.filter(|tab| is_tmux_tab(tab)) {
-                            self.tab_drag_cancelled = false;
-                            self.tab_drag = Some((tab.tab_id(), event.clone(), false));
-                        }
+                    let tab = Mux::get()
+                        .get_window(self.mux_window_id)
+                        .and_then(|window| window.get_tab_at_idx(tab_idx).cloned());
+                    if let Some(tab) = tab {
+                        self.tab_drag_cancelled = false;
+                        self.tab_drag = Some((tab.tab_id(), event.clone(), false));
                     }
                 }
                 TabBarItem::NewTabButton { .. } => {

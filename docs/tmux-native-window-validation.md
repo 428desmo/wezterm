@@ -643,3 +643,15 @@ This run therefore does not establish native hit-test or DPI-test success;
 physical drag and screen-placement confirmation remains outstanding. The
 successful standard-action/palette tests do not cover that assertion. No Windows
 execution or upstream acceptance is claimed.
+
+
+### Reorder tabs within one window by dragging
+
+Existing MoveTab/MoveTabRelative actions reorder tabs, but the mouse path did
+not use them. Tab presses now begin a drag for local and remote tabs. A drop
+onto another tab in the source tab bar selects the original tab by ID and
+reuses MoveTab; the order changes only on release. Escape therefore leaves
+order intact. Cross-window movement/tear-off retains the existing tmux opt-in.
+The GUI regression exercises MoveTab in both directions and checks identity;
+physical gestures and Escape need manual checks on Mac and Windows. The earlier
+native hit-test failure remains recorded and is not counted as a passing check.

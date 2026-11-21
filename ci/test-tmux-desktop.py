@@ -24,7 +24,7 @@ local function remote_tabs()
 end
 w.on('update-status',function()
  local stage=w.GLOBAL.desktop_test_stage or 0
- if stage>=6 then return end
+ if stage==6 then return end
  local original={}
  for _,id in ipairs(w.GLOBAL.desktop_test_tabs or {}) do table.insert(original,w.mux.get_tab(id)) end
  local tabs=remote_tabs()
@@ -43,7 +43,20 @@ w.on('update-status',function()
   original[1]:window():gui_window():perform_action(w.action.SpawnTab 'CurrentPaneDomain',original[1]:active_pane())
  elseif stage==1 and #tabs==4 then
   assert(tabs[4]:window():window_id()==original[1]:window():window_id(),'new tab created in wrong window')
-  w.GLOBAL.desktop_test_stage=2;original[1]:window():gui_window():perform_action(w.action.SpawnWindow,original[1]:active_pane())
+  w.GLOBAL.desktop_test_stage=10
+  tabs[4]:window():gui_window():perform_action(w.action.MoveTab(0),tabs[4]:active_pane())
+ elseif stage==10 then
+  local ordered=original[1]:window():tabs()
+  if ordered[1]:tab_id()~=tabs[4]:tab_id() then return end
+  assert(ordered[2]:tab_id()==original[1]:tab_id(),'reorder lost the original tab')
+  w.GLOBAL.desktop_test_stage=11
+  tabs[4]:window():gui_window():perform_action(w.action.MoveTab(1),tabs[4]:active_pane())
+ elseif stage==11 then
+  local ordered=original[1]:window():tabs()
+  if ordered[2]:tab_id()~=tabs[4]:tab_id() then return end
+  assert(ordered[1]:tab_id()==original[1]:tab_id(),'reverse reorder changed identity')
+  w.GLOBAL.desktop_test_stage=2
+  original[1]:window():gui_window():perform_action(w.action.SpawnWindow,original[1]:active_pane())
  elseif stage==2 and #tabs==5 then
   w.GLOBAL.desktop_test_stage=3;w.log_info('desktop-test: merge')
   assert(tabs[5]:window():window_id()~=original[1]:window():window_id(),'new OS window not separate')
