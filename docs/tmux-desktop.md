@@ -79,3 +79,5 @@ WindowsビルドとGUI実行は未確認です。
 SpawnTab / SpawnCommandInNewWindowアクションからの追加、タブ移動、ID維持、
 名前変更と各paneへの入力を確認します。実サーバーには接続しません。
 Launcherのマウス／キー操作と名前変更ダイアログは手動確認が必要です。
+
+Windowsでコピーと端末操作を分ける任意設定は [Windows向けキー設定](windows-mac-keys.md) を参照してください。
