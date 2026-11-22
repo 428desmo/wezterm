@@ -517,18 +517,27 @@ impl TmuxDomainState {
                 .filter(|id| mux.get_window(*id).is_some());
             if let Some(target) = requested_target {
                 mux.add_tab_to_window(&tab, target)?;
+                mux.record_tmux_tab_groups(&[target]);
             } else if self.window_per_os_window {
-                // Use the transport window's workspace, even if focus changed
-                // while the remote window list was being fetched.
-                let workspace = mux
-                    .get_window(**gui_window_id)
-                    .map(|w| w.get_workspace().to_string());
-                let mut window_builder = mux.new_empty_window(workspace, None);
-                if let Some(mut local_window) = mux.get_window_mut(*window_builder) {
-                    local_window.set_tmux_position_key(window.position_key.clone());
+                if let Some(target) = mux.tmux_group_destination(&window.position_key) {
+                    mux.add_tab_to_window(&tab, target)?;
+                    mux.restore_tmux_group_order(target, &window.position_key);
+                } else {
+                    // Use the transport window's workspace, even if focus changed
+                    // while the remote window list was being fetched.
+                    let workspace = mux
+                        .get_window(**gui_window_id)
+                        .map(|w| w.get_workspace().to_string());
+                    let mut window_builder = mux.new_empty_window(workspace, None);
+                    if let Some(mut local_window) = mux.get_window_mut(*window_builder) {
+                        let anchor =
+                            crate::tmux_layout::tab_group_position_key(&window.position_key)
+                                .unwrap_or_else(|| window.position_key.clone());
+                        local_window.set_tmux_position_key(anchor);
+                    }
+                    mux.add_tab_to_window(&tab, *window_builder)?;
+                    window_builder.notify();
                 }
-                mux.add_tab_to_window(&tab, *window_builder)?;
-                window_builder.notify();
             } else {
                 mux.add_tab_to_window(&tab, **gui_window_id)?;
             }

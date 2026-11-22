@@ -1256,6 +1256,90 @@ impl Mux {
         Ok((pane, size))
     }
 
+    fn tmux_layout_key_for_tab(&self, tab_id: TabId) -> Option<String> {
+        let tab = self.get_tab(tab_id)?;
+        for domain in self.iter_domains() {
+            if let Some(tmux) = domain.downcast_ref::<crate::tmux::TmuxDomain>() {
+                if let Some(key) = tmux.position_key_for_tab(tab_id) {
+                    return Some(key);
+                }
+                if tab
+                    .iter_panes_ignoring_zoom()
+                    .iter()
+                    .any(|p| p.pane.pane_id() == tmux.inner.pane_id)
+                {
+                    let session = (*tmux.inner.tmux_session.lock())?;
+                    let tabs = tmux.inner.gui_tabs.lock();
+                    let key = &tabs.values().next()?.position_key;
+                    let prefix = key
+                        .rsplit_once(':')
+                        .map_or(key.as_str(), |(prefix, _)| prefix);
+                    return Some(format!("{prefix}:session-{session}:control"));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn record_tmux_tab_groups(&self, windows: &[WindowId]) {
+        let groups = windows
+            .iter()
+            .filter_map(|id| {
+                self.get_window(*id).and_then(|window| {
+                    let tabs: Vec<_> = window
+                        .iter_tabs()
+                        .filter_map(|tab| self.tmux_layout_key_for_tab(tab.tab_id()))
+                        .collect();
+                    let anchor = window
+                        .tmux_position_key()
+                        .map(str::to_owned)
+                        .or_else(|| tabs.first().cloned())?;
+                    Some((anchor, tabs))
+                })
+            })
+            .collect();
+        crate::tmux_layout::record_tab_groups(groups);
+    }
+
+    pub(crate) fn tmux_group_destination(&self, key: &str) -> Option<WindowId> {
+        let group = crate::tmux_layout::tab_group(key)?;
+        self.iter_windows().into_iter().find(|id| {
+            self.get_window(*id).map_or(false, |window| {
+                window.iter_tabs().any(|tab| {
+                    self.tmux_layout_key_for_tab(tab.tab_id())
+                        .map_or(false, |key| group.contains(&key))
+                })
+            })
+        })
+    }
+
+    pub(crate) fn restore_tmux_group_order(&self, window_id: WindowId, key: &str) {
+        let Some(group) = crate::tmux_layout::tab_group(key) else {
+            return;
+        };
+        let Some(mut window) = self.get_window_mut(window_id) else {
+            return;
+        };
+        let active = window.get_active_tab().map(|tab| tab.tab_id());
+        let mut tabs: Vec<_> = window.iter_tabs().cloned().collect();
+        tabs.sort_by_key(|tab| {
+            self.tmux_layout_key_for_tab(tab.tab_id())
+                .and_then(|key| group.iter().position(|member| member == &key))
+                .unwrap_or(usize::MAX)
+        });
+        for (index, tab) in tabs.iter().enumerate() {
+            if let Some(current) = window.get_tab_idx_for_id(tab.tab_id()) {
+                if current != index {
+                    let tab = window.remove_tab_idx(current);
+                    window.insert_tab_at_idx(index, &tab);
+                }
+            }
+        }
+        if let Some(index) = active.and_then(|id| window.get_tab_idx_for_id(id)) {
+            window.set_active_tab_idx_without_saving(index);
+        }
+    }
+
     /// Reparent a whole tab without changing its panes or remote tmux identity.
     pub fn move_tab_to_window(
         &self,
@@ -1314,21 +1398,26 @@ impl Mux {
             }
         }
         for id in [source, destination] {
-            let first = self
+            let keys: Vec<_> = self
                 .get_window(id)
-                .and_then(|w| w.iter_tabs().next().cloned());
-            if let Some(first) = first {
-                let key = first
-                    .get_active_pane()
-                    .and_then(|p| self.get_domain(p.domain_id()))
-                    .and_then(|d| {
-                        d.downcast_ref::<crate::tmux::TmuxDomain>()?
-                            .position_key_for_tab(first.tab_id())
-                    });
-                if let Some(key) = key {
-                    if let Some(mut window) = self.get_window_mut(id) {
-                        window.set_tmux_position_key(key);
+                .map(|window| {
+                    window
+                        .iter_tabs()
+                        .filter_map(|tab| self.tmux_layout_key_for_tab(tab.tab_id()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Keep the transport's geometry identity even if its tab is not first.
+            if let Some(key) = keys
+                .iter()
+                .find(|key| key.ends_with(":control"))
+                .or_else(|| keys.first())
+            {
+                if let Some(mut window) = self.get_window_mut(id) {
+                    if let Some(previous) = window.tmux_position_key() {
+                        crate::tmux_layout::copy_position(previous, key);
                     }
+                    window.set_tmux_position_key(key.clone());
                 }
             }
             self.notify(MuxNotification::WindowInvalidated(id));
@@ -1336,6 +1425,7 @@ impl Mux {
         if let Some(window) = builder.as_mut() {
             window.notify();
         }
+        self.record_tmux_tab_groups(&[source, destination]);
         self.prune_dead_windows();
         Ok(destination)
     }

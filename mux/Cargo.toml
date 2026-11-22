@@ -44,6 +44,7 @@ terminfo.workspace = true
 termwiz-funcs.workspace = true
 termwiz.workspace = true
 textwrap.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 url.workspace = true
 wezterm-dynamic.workspace = true
@@ -56,4 +57,3 @@ windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 k9.workspace = true
-tempfile.workspace = true

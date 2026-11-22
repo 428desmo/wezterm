@@ -118,7 +118,7 @@ return {tmux_window_per_os_window=true,check_for_updates=false,window_close_conf
       try:
         tm('new-session','-d','-s','smoke','-n','one','/bin/sh')
         tm('new-window','-t','smoke','-n','two','/bin/sh');tm('new-window','-t','smoke','-n','three','/bin/sh')
-        process=subprocess.Popen([gui,'--config-file',str(config),'start','--always-new-process','--']+base+['-CC','attach-session','-t','smoke'],stdout=log,stderr=log)
+        process=subprocess.Popen([gui,'--config-file',str(config),'start','--always-new-process','--']+base+['-CC','attach-session','-t','smoke'],stdout=log,stderr=log,env=dict(os.environ,WEZTERM_TMUX_GROUPS_FILE=temp+'/groups.json'))
         env=dict(os.environ,WEZTERM_UNIX_SOCKET=str(pathlib.Path.home()/'.local/share/wezterm'/('gui-sock-'+str(process.pid))))
         end=time.monotonic()+30
         while not result_file.exists():
