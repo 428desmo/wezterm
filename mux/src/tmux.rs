@@ -64,11 +64,31 @@ pub(crate) struct TmuxTab {
 }
 
 pub(crate) type TmuxCmdQueue = VecDeque<Box<dyn TmuxCommand>>;
+
+// Bound outstanding input commands without imposing a round trip per keystroke.
+const MAX_IN_FLIGHT_INPUT: usize = 32;
+
+struct InFlightCommand {
+    command: Box<dyn TmuxCommand>,
+    replies_left: usize,
+    first_error: Option<Guarded>,
+}
+
+type InFlightQueue = VecDeque<InFlightCommand>;
+
+fn can_send_command(command: &dyn TmuxCommand, in_flight: &InFlightQueue) -> bool {
+    in_flight.is_empty()
+        || (in_flight.len() < MAX_IN_FLIGHT_INPUT
+            && command.is_input()
+            && in_flight.iter().all(|sent| sent.command.is_input()))
+}
+
 pub(crate) struct TmuxDomainState {
     pub pane_id: PaneId,     // ID of the original pane
     pub domain_id: DomainId, // ID of TmuxDomain
     state: Mutex<State>,
     pub cmd_queue: Arc<Mutex<TmuxCmdQueue>>,
+    in_flight: Mutex<InFlightQueue>,
     pub gui_window: Mutex<Option<MuxWindowBuilder>>,
     pub gui_tabs: Mutex<HashMap<TmuxWindowId, TmuxTab>>,
     pub remote_panes: Mutex<HashMap<TmuxPaneId, RefTmuxRemotePane>>,
@@ -98,17 +118,30 @@ impl TmuxDomainState {
                         *self.state.lock() = State::Idle;
                     }
                     State::WaitingForResponse => {
-                        let mut cmd_queue = self.cmd_queue.as_ref().lock();
-                        if let Some(cmd) = cmd_queue.pop_front() {
-                            let domain_id = self.domain_id;
-                            *self.state.lock() = State::Idle;
-                            let resp = response.clone();
-                            promise::spawn::spawn_into_main_thread(async move {
-                                if let Err(err) = cmd.process_result(domain_id, &resp) {
-                                    log::error!("Tmux processing command result error: {}", err);
+                        let mut in_flight = self.in_flight.lock();
+                        if let Some(first) = in_flight.front_mut() {
+                            if response.error && first.first_error.is_none() {
+                                first.first_error = Some(response.clone());
+                            }
+                            first.replies_left -= 1;
+                            if first.replies_left == 0 {
+                                let sent = in_flight.pop_front().unwrap();
+                                let domain_id = self.domain_id;
+                                if in_flight.is_empty() {
+                                    *self.state.lock() = State::Idle;
                                 }
-                            })
-                            .detach();
+                                let resp = sent.first_error.unwrap_or_else(|| response.clone());
+                                let command = sent.command;
+                                promise::spawn::spawn_into_main_thread(async move {
+                                    if let Err(err) = command.process_result(domain_id, &resp) {
+                                        log::error!(
+                                            "Tmux processing command result error: {}",
+                                            err
+                                        );
+                                    }
+                                })
+                                .detach();
+                            }
                         }
                     }
                     State::Idle => {}
@@ -132,6 +165,7 @@ impl TmuxDomainState {
                     }
                     let mut cmd_queue = self.cmd_queue.as_ref().lock();
                     cmd_queue.clear();
+                    self.in_flight.lock().clear();
 
                     // Force to quit the tmux mode
                     let pane_id = self.pane_id;
@@ -233,32 +267,55 @@ impl TmuxDomainState {
 
         // send pending commands to tmux
         let cmd_queue = self.cmd_queue.as_ref().lock();
-        if *self.state.lock() == State::Idle && !cmd_queue.is_empty() {
+        if matches!(*self.state.lock(), State::Idle | State::WaitingForResponse)
+            && !cmd_queue.is_empty()
+        {
             TmuxDomainState::schedule_send_next_command(self.domain_id);
         }
     }
 
-    /// send next command at the front of cmd_queue.
-    /// must be called inside main thread
+    /// Send input without waiting for each preceding input's reply. Keep all
+    /// other commands serialized: their results may change local mux state.
+    /// Must be called inside the main thread.
     fn send_next_command(&self) {
-        if *self.state.lock() != State::Idle {
+        let mut pending = self.cmd_queue.lock();
+        let mut in_flight = self.in_flight.lock();
+        if !matches!(*self.state.lock(), State::Idle | State::WaitingForResponse) {
             return;
         }
-        let mut cmd_queue = self.cmd_queue.as_ref().lock();
-        while let Some(first) = cmd_queue.front() {
-            let cmd = first.get_command(self.domain_id);
-            if cmd.is_empty() {
-                cmd_queue.pop_front();
+        let mux = Mux::get();
+        let Some(pane) = mux.get_pane(self.pane_id) else {
+            return;
+        };
+        let mut writer = pane.writer();
+        while let Some(first) = pending.front() {
+            if !can_send_command(first.as_ref(), &in_flight) {
+                break;
+            }
+            let wire_command = first.get_command(self.domain_id);
+            if wire_command.is_empty() {
+                pending.pop_front();
                 continue;
             }
-            log::debug!("sending cmd {:?}", cmd);
-            let mux = Mux::get();
-            if let Some(pane) = mux.get_pane(self.pane_id) {
-                let mut writer = pane.writer();
-                let _ = write!(writer, "{}", cmd);
-            }
+            // Keep reply handlers in wire order, including failed tmux commands.
+            // Hold in_flight until the write completes so a fast reply cannot
+            // overtake registration of its handler.
+            let command = pending.pop_front().unwrap();
+            in_flight.push_back(InFlightCommand {
+                // Resize emits two command lines, each with its own guard.
+                replies_left: command.response_count(),
+                command,
+                first_error: None,
+            });
             *self.state.lock() = State::WaitingForResponse;
-            break;
+            if let Err(err) = writer.write_all(wire_command.as_bytes()) {
+                // A partial write cannot safely be retried on this transport.
+                *self.state.lock() = State::Exit;
+                pending.clear();
+                in_flight.clear();
+                log::error!("Writing tmux command failed: {err:#}");
+                break;
+            }
         }
     }
 
@@ -346,6 +403,7 @@ impl TmuxDomain {
             // parser,
             state: Mutex::new(State::WaitForInitialGuard),
             cmd_queue: Arc::new(Mutex::new(cmd_queue)),
+            in_flight: Mutex::new(VecDeque::new()),
             gui_window: Mutex::new(None),
             gui_tabs: Mutex::new(HashMap::default()),
             remote_panes: Mutex::new(HashMap::default()),
@@ -487,5 +545,101 @@ impl Domain for TmuxDomain {
 
     fn state(&self) -> DomainState {
         DomainState::Attached
+    }
+}
+
+#[cfg(test)]
+mod input_pipeline_tests {
+    use super::*;
+    use crate::tmux_commands::SendKeys;
+
+    fn sent(command: Box<dyn TmuxCommand>, replies_left: usize) -> InFlightCommand {
+        InFlightCommand {
+            command,
+            replies_left,
+            first_error: None,
+        }
+    }
+
+    fn input() -> Box<dyn TmuxCommand> {
+        Box::new(SendKeys {
+            pane: 1,
+            keys: vec![b'a'],
+        })
+    }
+
+    #[test]
+    fn input_overlaps_but_structural_commands_are_barriers() {
+        let structural = ListCommands;
+        let mut in_flight = VecDeque::new();
+        assert!(can_send_command(&structural, &in_flight));
+        in_flight.push_back(sent(input(), 1));
+        assert!(can_send_command(input().as_ref(), &in_flight));
+        assert!(!can_send_command(&structural, &in_flight));
+        for _ in 1..MAX_IN_FLIGHT_INPUT {
+            in_flight.push_back(sent(input(), 1));
+        }
+        assert!(!can_send_command(input().as_ref(), &in_flight));
+        in_flight.pop_front();
+        assert!(can_send_command(input().as_ref(), &in_flight));
+        in_flight.clear();
+        in_flight.push_back(sent(Box::new(ListCommands), 1));
+        assert!(!can_send_command(input().as_ref(), &in_flight));
+        assert!(!can_send_command(&structural, &in_flight));
+    }
+
+    #[test]
+    fn guarded_replies_match_sent_commands_even_after_an_error() {
+        #[derive(Debug)]
+        struct Record(usize, Arc<Mutex<Vec<(usize, bool)>>>);
+        impl TmuxCommand for Record {
+            fn is_input(&self) -> bool {
+                true
+            }
+            fn get_command(&self, _: DomainId) -> String {
+                unreachable!()
+            }
+            fn process_result(&self, _: DomainId, result: &Guarded) -> anyhow::Result<()> {
+                self.1.lock().push((self.0, result.error));
+                Ok(())
+            }
+        }
+        let executor = promise::spawn::ScopedExecutor::new();
+        let domain = TmuxDomain::new(usize::MAX);
+        let seen = Arc::new(Mutex::new(vec![]));
+        for id in 0..3 {
+            domain.inner.in_flight.lock().push_back(sent(
+                Box::new(Record(id, seen.clone())),
+                if id == 1 { 2 } else { 1 },
+            ));
+        }
+        *domain.inner.state.lock() = State::WaitingForResponse;
+        for id in 0..4 {
+            domain.inner.advance(Box::new(vec![Event::Guarded(Guarded {
+                timestamp: 0,
+                number: id,
+                flags: 1,
+                error: id == 1,
+                output: String::new(),
+            })]));
+            assert_eq!(
+                domain.inner.in_flight.lock().len(),
+                [2, 2, 1, 0][id as usize]
+            );
+            assert_eq!(
+                *domain.inner.state.lock(),
+                if id == 3 {
+                    State::Idle
+                } else {
+                    State::WaitingForResponse
+                }
+            );
+        }
+        smol::block_on(executor.run(async {
+            while seen.lock().len() < 3 {
+                smol::future::yield_now().await;
+            }
+        }));
+        assert_eq!(*seen.lock(), vec![(0, false), (1, true), (2, false)]);
     }
 }

@@ -18,6 +18,16 @@ use termwiz::tmux_cc::*;
 use wezterm_term::TerminalSize;
 
 pub(crate) trait TmuxCommand: Send + Debug {
+    /// Only input commands may overlap. Structural commands remain barriers.
+    fn is_input(&self) -> bool {
+        false
+    }
+
+    /// Number of newline-delimited command replies produced by get_command.
+    fn response_count(&self) -> usize {
+        1
+    }
+
     fn get_command(&self, domain_id: DomainId) -> String;
     fn process_result(&self, domain_id: DomainId, result: &Guarded) -> anyhow::Result<()>;
 }
@@ -934,6 +944,10 @@ pub(crate) struct Resize {
 }
 
 impl TmuxCommand for Resize {
+    fn response_count(&self) -> usize {
+        2
+    }
+
     fn get_command(&self, domain_id: DomainId) -> String {
         let mux = Mux::get();
         let domain = match mux.get_domain(domain_id) {
@@ -1075,6 +1089,10 @@ pub(crate) struct SendKeys {
     pub pane: TmuxPaneId,
 }
 impl TmuxCommand for SendKeys {
+    fn is_input(&self) -> bool {
+        true
+    }
+
     fn get_command(&self, _domain_id: DomainId) -> String {
         let mut s = String::new();
         for &byte in self.keys.iter() {
