@@ -370,7 +370,7 @@ pub struct RequestedWindowGeometry {
     /// Specifies basis for evaluating x/y coords.
     /// Also applies to width/height when computing % based dimensions
     pub origin: GeometryOrigin,
-    /// Optional destination screen hint for native creation (macOS).
+    /// Optional absolute destination hint for native creation (macOS and Windows).
     pub initial_placement: Option<InitialWindowPlacement>,
 }
 

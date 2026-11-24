@@ -913,6 +913,23 @@ impl TermWindow {
             origin = position.origin;
         }
 
+        // Tab drops carry absolute native desktop coordinates. Do not add the
+        // virtual desktop origin again on Windows (left/above monitors).
+        let absolute_placement = if cfg!(target_os = "windows")
+            && origin == GeometryOrigin::ScreenCoordinateSystem
+        {
+            match (x, y) {
+                (Some(Dimension::Pixels(x)), Some(Dimension::Pixels(y))) => {
+                    Some(InitialWindowPlacement {
+                        position: euclid::point2(x as isize, y as isize),
+                        backing_scale: 1.0,
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let geometry = RequestedWindowGeometry {
             width: Dimension::Pixels(dimensions.pixel_width as f32),
             height: Dimension::Pixels(dimensions.pixel_height as f32),
@@ -924,7 +941,7 @@ impl TermWindow {
                     position: *position,
                     backing_scale: screen.backing_scale,
                 }
-            }),
+            }).or(absolute_placement),
         };
         if let Some((point, screen)) = &saved_placement {
             log::info!(

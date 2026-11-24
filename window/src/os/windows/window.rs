@@ -401,6 +401,41 @@ fn decorations_to_style(decorations: WindowDecorations) -> u32 {
     }
 }
 
+// Fit the native outer frame, including the caption and resize borders.
+// MonitorFromPoint keeps drops on their destination monitor, including negative
+// desktop coordinates. rcWork excludes taskbars on any edge.
+fn fit_window_frame(
+    monitor: HMONITOR,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> (i32, i32, i32, i32) {
+    unsafe {
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return (x, y, width, height);
+        }
+        let work = info.rcWork;
+        let frame = crate::screen::fit_window_to_work_area(
+            euclid::rect(x as isize, y as isize, width as isize, height as isize),
+            euclid::rect(
+                work.left as isize,
+                work.top as isize,
+                (work.right - work.left) as isize,
+                (work.bottom - work.top) as isize,
+            ),
+        );
+        (
+            frame.origin.x as i32,
+            frame.origin.y as i32,
+            frame.width() as i32,
+            frame.height() as i32,
+        )
+    }
+}
+
 fn get_primary_monitor_dpi() -> u32 {
     let primary = unsafe { MonitorFromWindow(null_mut(), MONITOR_DEFAULTTOPRIMARY) };
     assert!(!primary.is_null(), "MonitorFromWindow() returned NULL");
@@ -500,6 +535,12 @@ impl Window {
             }
         };
 
+        let (x, y, width, height) = if x != CW_USEDEFAULT && y != CW_USEDEFAULT {
+            let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+            fit_window_frame(monitor, x, y, width, height)
+        } else {
+            (x, y, width, height)
+        };
         let name = wide_string(name);
         let hwnd = unsafe {
             CreateWindowExW(
@@ -574,7 +615,12 @@ impl Window {
 
         let conn = Connection::get().expect("Connection::init was not called");
 
-        let geometry = conn.resolve_geometry(geometry);
+        let placement = geometry.initial_placement;
+        let mut geometry = conn.resolve_geometry(geometry);
+        if let Some(placement) = placement {
+            geometry.x = Some(placement.position.x as i32);
+            geometry.y = Some(placement.position.y as i32);
+        }
 
         let hwnd = match Self::create_window(config, class_name, name, geometry, raw) {
             Ok(hwnd) => HWindow(hwnd),
@@ -666,14 +712,21 @@ impl WindowInner {
                 let delta_x = origin.x as i32 - rect.left;
                 let delta_y = origin.y as i32 - rect.top;
 
-                MoveWindow(
-                    hwnd,
+                let monitor = MonitorFromPoint(
+                    POINT {
+                        x: coords.x as i32,
+                        y: coords.y as i32,
+                    },
+                    MONITOR_DEFAULTTONEAREST,
+                );
+                let (x, y, width, height) = fit_window_frame(
+                    monitor,
                     coords.x as i32 - delta_x,
                     coords.y as i32 - delta_y,
                     rect_width(&rect),
                     rect_height(&rect),
-                    1,
                 );
+                MoveWindow(hwnd, x, y, width, height, 1);
             }
         })
         .detach();
@@ -936,14 +989,23 @@ impl WindowOps for Window {
                 if window_state.can_resize() {
                     log::trace!("set_inner_size now calling SetWindowPos with {width}x{height}");
                     unsafe {
+                        let mut rect: RECT = std::mem::zeroed();
+                        GetWindowRect(hwnd.0, &mut rect);
+                        let (x, y, width, height) = fit_window_frame(
+                            MonitorFromWindow(hwnd.0, MONITOR_DEFAULTTONEAREST),
+                            rect.left,
+                            rect.top,
+                            width,
+                            height,
+                        );
                         SetWindowPos(
                             hwnd.0,
                             hwnd.0,
-                            0,
-                            0,
+                            x,
+                            y,
                             width,
                             height,
-                            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER,
+                            SWP_NOACTIVATE | SWP_NOZORDER,
                         );
                         wm_paint(hwnd.0, 0, 0, 0);
                         if let Some(inner) = rc_from_hwnd(hwnd.0) {
