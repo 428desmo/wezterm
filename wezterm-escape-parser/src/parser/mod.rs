@@ -946,6 +946,27 @@ mod test {
         }
     }
 
+    #[cfg(feature = "tmux_cc")]
+    #[test]
+    fn tmux_other_client_notifications_keep_control_mode_active() {
+        let input = "\x1bP1000p%client-session-changed /dev/pts/12-client.1:2 $1 test\n%unlinked-window-renamed @10 ssh\n%unlinked-window-renamed @11 日本語 name\n%unlinked-window-renamed @12\n%client-detached /dev/pts/12-client.1:2\n%window-renamed @0 still-connected\n";
+        for split in 0..=input.len() {
+            let mut parser = Parser::new();
+            let mut actions = parser.parse_as_vec(&input.as_bytes()[..split]);
+            actions.extend(parser.parse_as_vec(&input.as_bytes()[split..]));
+            assert!(parser.state.borrow().tmux_state.is_some(), "split={split}");
+            let events: Vec<_> = actions.iter().filter_map(|action| match action {
+                Action::DeviceControl(DeviceControlMode::TmuxEvents(events)) => Some(events.iter()),
+                _ => None,
+            }).flatten().collect();
+            assert_eq!(events.len(), 6, "split={split}");
+            assert!(events.iter().any(|event| matches!(event,
+                Event::UnlinkedWindowRenamed { window: 10 })), "split={split}");
+            assert!(events.iter().any(|event| matches!(event,
+                Event::WindowRenamed { name, .. } if name == "still-connected")), "split={split}");
+        }
+    }
+
     #[test]
     fn tmux_title_escape() {
         let mut p = Parser::new();
