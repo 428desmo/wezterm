@@ -154,18 +154,22 @@ impl TmuxDomainState {
     }
 
     pub fn remove_detached_window(&self, window_id: TmuxWindowId) -> anyhow::Result<()> {
-        let mut gui_tabs = self.gui_tabs.lock();
-        let tab = match gui_tabs.get(&window_id) {
-            Some(x) => x,
-            None => {
-                anyhow::bail!("Cannot find the window {window_id}")
+        // Release domain locks before mux removal can notify GUI subscribers.
+        let tab = self
+            .gui_tabs
+            .lock()
+            .remove(&window_id)
+            .ok_or_else(|| anyhow::anyhow!("Cannot find the window {window_id}"))?;
+        for pane_id in tab.panes {
+            if let Some(pane) = self.remote_panes.lock().remove(&pane_id) {
+                let pane = pane.lock();
+                let (lock, condvar) = &*pane.active_lock;
+                *lock.lock() = true;
+                condvar.notify_all();
             }
-        };
-
-        let mux = Mux::get();
-        mux.remove_tab(tab.tab_id);
-        gui_tabs.remove(&window_id);
-
+            self.backlog.lock().remove(&pane_id);
+        }
+        Mux::get().remove_tab(tab.tab_id);
         Ok(())
     }
 
@@ -1146,6 +1150,22 @@ impl TmuxCommand for NewWindow {
 }
 
 #[derive(Debug)]
+pub(crate) struct KillWindow {
+    pub window: TmuxWindowId,
+}
+
+impl TmuxCommand for KillWindow {
+    fn get_command(&self, _domain_id: DomainId) -> String {
+        format!("kill-window -t @{}\n", self.window)
+    }
+
+    fn process_result(&self, _domain_id: DomainId, result: &Guarded) -> anyhow::Result<()> {
+        anyhow::ensure!(!result.error, "tmux kill-window failed: {}", result.output);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct RenameWindow {
     pub window: u64,
     pub name: String,
@@ -1364,7 +1384,38 @@ mod native_window_tests {
                 .map(|tab| mux.window_containing_tab(tab.tab_id).unwrap())
                 .collect();
             assert_eq!(window_ids.len(), if native { 3 } else { 1 });
+            let remote_tab = tabs[&1].tab_id;
+            let other_tab = tabs[&2].tab_id;
             drop(tabs);
+            let queued = domain.inner.cmd_queue.lock().len();
+            assert!(mux.is_tmux_tab(remote_tab));
+            mux.close_tab(remote_tab).unwrap();
+            assert!(
+                mux.get_tab(remote_tab).is_some(),
+                "wait for server acknowledgment"
+            );
+            {
+                let commands = domain.inner.cmd_queue.lock();
+                assert_eq!(commands.len(), queued + 1);
+                let delete = commands.back().unwrap();
+                assert_eq!(
+                    delete.get_command(domain.inner.domain_id),
+                    "kill-window -t @1\n"
+                );
+                assert!(!delete.is_input(), "deletion is an input pipeline barrier");
+            }
+            let other_window = mux.window_containing_tab(other_tab).unwrap();
+            mux.kill_window(other_window);
+            assert_eq!(
+                domain.inner.cmd_queue.lock().len(), queued + 1,
+                "OS-window close must not delete server windows"
+            );
+            domain.inner.remove_detached_window(1).unwrap();
+            assert!(mux.get_tab(remote_tab).is_none());
+            assert_eq!(
+                domain.inner.cmd_queue.lock().len(), queued + 1,
+                "server close must not send another delete"
+            );
             drop(domain);
             Mux::shutdown();
             // Drop outside the global mutex; the Activity assertions above

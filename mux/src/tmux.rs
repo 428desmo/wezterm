@@ -230,8 +230,20 @@ impl TmuxDomainState {
                         }
                     }
                 }
-                Event::WindowClose { window } => {
-                    let _ = self.remove_detached_window(*window);
+                Event::WindowClose { window } | Event::UnlinkedWindowClose { window } => {
+                    // Protocol parsing runs on the transport reader thread.
+                    // Do GUI/mux teardown on the main thread to avoid lock
+                    // inversion with concurrent overlay and tab updates.
+                    let domain_id = self.domain_id;
+                    let window = *window;
+                    promise::spawn::spawn_into_main_thread(async move {
+                        if let Some(domain) = Mux::get().get_domain(domain_id) {
+                            if let Some(tmux) = domain.downcast_ref::<TmuxDomain>() {
+                                let _ = tmux.inner.remove_detached_window(window);
+                            }
+                        }
+                    })
+                    .detach();
                 }
                 Event::WindowPaneChanged { window, pane } => {
                     // The tmux 2.7 WindowPaneChanged event comes early than WindowAdd, we need to
@@ -257,9 +269,6 @@ impl TmuxDomainState {
                             tab.set_title(&format!("{}", name));
                         }
                     }
-                }
-                Event::UnlinkedWindowClose { window } => {
-                    let _ = self.remove_detached_window(*window);
                 }
                 _ => {}
             }
@@ -439,6 +448,29 @@ impl TmuxDomain {
             .values()
             .find(|t| t.tab_id == tab)
             .map(|t| t.position_key.clone())
+    }
+
+    /// Delete the server window, leaving local cleanup to %window-close.
+    /// OS-window close and application shutdown must not call this method.
+    pub fn kill_window(&self, tab: TabId) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            *self.inner.state.lock() != State::Exit,
+            "tmux connection is closed"
+        );
+        let window = self
+            .inner
+            .gui_tabs
+            .lock()
+            .values()
+            .find(|window| window.tab_id == tab)
+            .map(|window| window.tmux_window_id)
+            .ok_or_else(|| anyhow::anyhow!("tmux tab not found"))?;
+        self.inner
+            .cmd_queue
+            .lock()
+            .push_back(Box::new(crate::tmux_commands::KillWindow { window }));
+        TmuxDomainState::schedule_send_next_command(self.inner.domain_id);
+        Ok(())
     }
 
     pub fn rename_window(&self, tab: TabId, name: &str) -> anyhow::Result<()> {

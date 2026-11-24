@@ -21,3 +21,8 @@ confirm whether you want to close it.  See also
 If `confirm` is false then this action will immediately close
 the tab and terminates its panes without prompting.
 
+
+For tmux control-mode tabs, closing the tab deletes the corresponding window
+on the tmux server, including its panes and jobs. With `confirm = true`, the
+confirmation prompt explains this and can be cancelled with No or Escape.
+Closing an OS window or quitting WezTerm preserves the remote tmux windows.

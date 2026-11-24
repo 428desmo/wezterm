@@ -3544,7 +3544,9 @@ impl TermWindow {
         drop(mux_window);
 
         let tab_id = tab.tab_id();
-        if confirm && !tab.can_close_without_prompting(CloseReason::Tab) {
+        if confirm
+            && (mux.is_tmux_tab(tab_id) || !tab.can_close_without_prompting(CloseReason::Tab))
+        {
             if self.activate_tab(tab_idx as isize).is_err() {
                 return;
             }
@@ -3556,7 +3558,9 @@ impl TermWindow {
             self.assign_overlay(tab_id, overlay);
             promise::spawn::spawn(future).detach();
         } else {
-            mux.remove_tab(tab_id);
+            if let Err(err) = mux.close_tab(tab_id) {
+                log::error!("Closing tab failed: {err:#}");
+            }
         }
     }
 
@@ -3568,7 +3572,9 @@ impl TermWindow {
         };
         let tab_id = tab.tab_id();
         let mux_window_id = self.mux_window_id;
-        if confirm && !tab.can_close_without_prompting(CloseReason::Tab) {
+        if confirm
+            && (mux.is_tmux_tab(tab_id) || !tab.can_close_without_prompting(CloseReason::Tab))
+        {
             let window = self.window.clone().unwrap();
             let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
                 confirm_close_tab(tab_id, term, mux_window_id, window)
@@ -3576,7 +3582,9 @@ impl TermWindow {
             self.assign_overlay(tab_id, overlay);
             promise::spawn::spawn(future).detach();
         } else {
-            mux.remove_tab(tab_id);
+            if let Err(err) = mux.close_tab(tab_id) {
+                log::error!("Closing tab failed: {err:#}");
+            }
         }
     }
 

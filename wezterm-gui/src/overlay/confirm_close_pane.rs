@@ -34,13 +34,17 @@ pub fn confirm_close_tab(
     _mux_window_id: WindowId,
     window: ::window::Window,
 ) -> anyhow::Result<()> {
-    if confirm::run_confirmation(
-        "🛑 Really kill this tab and all contained panes?",
-        &mut term,
-    )? {
+    let message = if Mux::get().is_tmux_tab(tab_id) {
+        "🛑 Really delete this tmux window on the server and terminate all its panes and jobs?"
+    } else {
+        "🛑 Really kill this tab and all contained panes?"
+    };
+    if confirm::run_confirmation(message, &mut term)? {
         promise::spawn::spawn_into_main_thread(async move {
             let mux = Mux::get();
-            mux.remove_tab(tab_id);
+            if let Err(err) = mux.close_tab(tab_id) {
+                log::error!("Closing tab failed: {err:#}");
+            }
         })
         .detach();
     }

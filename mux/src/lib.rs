@@ -898,6 +898,33 @@ impl Mux {
         self.prune_dead_windows();
     }
 
+    fn tmux_domain_for_tab(&self, tab_id: TabId) -> Option<Arc<dyn Domain>> {
+        self.iter_domains().into_iter().find(|domain| {
+            domain
+                .downcast_ref::<crate::tmux::TmuxDomain>()
+                .and_then(|tmux| tmux.position_key_for_tab(tab_id))
+                .is_some()
+        })
+    }
+
+    pub fn is_tmux_tab(&self, tab_id: TabId) -> bool {
+        self.tmux_domain_for_tab(tab_id).is_some()
+    }
+
+    /// Explicitly closing a tab destroys its remote tmux window, if any.
+    /// Low-level removal, OS-window close and shutdown remain local operations.
+    pub fn close_tab(&self, tab_id: TabId) -> anyhow::Result<()> {
+        if let Some(domain) = self.tmux_domain_for_tab(tab_id) {
+            domain
+                .downcast_ref::<crate::tmux::TmuxDomain>()
+                .unwrap()
+                .kill_window(tab_id)?;
+        } else {
+            self.remove_tab(tab_id);
+        }
+        Ok(())
+    }
+
     pub fn remove_tab(&self, tab_id: TabId) -> Option<Arc<Tab>> {
         let tab = self.remove_tab_internal(tab_id);
         self.prune_dead_windows();
